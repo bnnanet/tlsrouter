@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/csv"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,14 +61,19 @@ func saveToCache(cachePath string, data []byte) error {
 	return os.WriteFile(cachePath, data, 0644)
 }
 
-// validateBytes checks if the byte sequence matches the name (if provided)
-func validateBytes(buf []byte, name string) error {
+// checkBytesAndName checks if the byte sequence matches the name (if provided)
+func checkBytesAndName(buf []byte, name string) error {
 	if name == "" {
 		return nil // No name to validate against
 	}
 
 	if string(buf) != name {
-		return fmt.Errorf("byte sequence %q does not match name %q", hex.EncodeToString(buf), name)
+		return fmt.Errorf(
+			"bytes 0x%x %q do not match name %q",
+			buf,
+			string(buf),
+			name,
+		)
 	}
 
 	return nil
@@ -139,8 +143,9 @@ func parseCsv(data []byte) ([]ianaalpn.Entry, error) {
 			continue
 		}
 
-		if err := validateBytes(entry.Bytes, entry.Name); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: validation failed for %q: %v\n", idSeq, err)
+		if err := checkBytesAndName(entry.Bytes, entry.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %q: %v\n", idSeq, err)
+			entry.Name = string(entry.Bytes)
 		}
 
 		entries = append(entries, entry)
