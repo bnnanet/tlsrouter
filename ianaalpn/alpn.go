@@ -12,7 +12,7 @@ const (
 	// URL is the location to view the list of registered ALPNs on the web
 	URL = "https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#alpn-protocol-ids"
 	// CSVURL is the location of the CSV-formatted list.
-	// Note that as of 2025-05-15 smart quotes are mistakenly used for mqtt
+	// Note: on 2025-05-15 the smart quotes used for mqtt were replaced with ASCII quotes
 	CSVURL = "https://www.iana.org/assignments/tls-extensiontype-values/alpn-protocol-ids.csv"
 	// ComplaintURL can be used to submit issues with the IANA ALPN registration
 	ComplaintURL = "https://www.iana.org/form/complaint"
@@ -86,9 +86,7 @@ func ParseCSVEntry(proto, idSeq, ref string) (Entry, error) {
 	for field := range fields {
 		if strings.HasPrefix(field, "(") {
 			field = strings.TrimPrefix(field, "(\"")
-			field = strings.TrimPrefix(field, "(“")
 			field = strings.TrimSuffix(field, "\")")
-			field = strings.TrimSuffix(field, "”)")
 			entry.Name = field
 		} else {
 			field = strings.TrimPrefix(field, "0x")
