@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/bnnanet/tlsrouter"
 )
@@ -71,6 +73,14 @@ func main() {
 	bind := defaultBind
 	mainFlags.StringVar(&bind, "bind", defaultBind, "Address to bind to")
 
+	defaultCfgPath := "tlsrouter.json"
+	// Check BIND environment variable, override default if set
+	if envCfgPath := os.Getenv("CONFIG_FILE"); envCfgPath != "" {
+		defaultCfgPath = envCfgPath
+	}
+	cfgPath := defaultCfgPath
+	mainFlags.StringVar(&cfgPath, "config", defaultCfgPath, "Path to JSON config file")
+
 	mainFlags.Usage = func() {
 		printVersion()
 		fmt.Fprintf(os.Stderr, "\n")
@@ -113,9 +123,41 @@ func main() {
 		return
 	}
 
+	cfg, err := ReadConfig(cfgPath)
+	if err != nil {
+		log.Fatalf("Error: %q\n%s\n", cfgPath, err)
+	}
+
 	// Use the bind address and port
 	addr := fmt.Sprintf("%s:%d", bind, port)
 	log.Printf("Listening on %s...", addr)
+	for _, site := range cfg {
+		fmt.Printf("   %s\n", site.Domain)
+		for _, t := range site.Targets {
+			fmt.Printf("      %s:%d (%s)\n", t.Addr, t.Port, strings.Join(t.ALPNs, ","))
+		}
+	}
 
-	log.Fatal(tlsrouter.Listen(addr))
+	lnCfg := tlsrouter.NewListenConfig(cfg)
+	log.Fatalf("Error:\n%s\n", lnCfg.ListenAndProxy(addr))
+}
+
+// ReadConfig reads and parses a JSON config file into a Config.
+func ReadConfig(filePath string) (tlsrouter.Config, error) {
+	// Read the file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+	}
+
+	var config tlsrouter.Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config JSON: %w", err)
+	}
+
+	if err := tlsrouter.LintConfig(config); nil != err {
+		return nil, err
+	}
+
+	return tlsrouter.NormalizeConfig(config), nil
 }
