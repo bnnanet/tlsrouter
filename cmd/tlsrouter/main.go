@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/bnnanet/tlsrouter"
+	"github.com/bnnanet/tlsrouter/ianaalpn"
 )
 
 const (
@@ -125,39 +127,51 @@ func main() {
 
 	cfg, err := ReadConfig(cfgPath)
 	if err != nil {
-		log.Fatalf("Error: %q\n%s\n", cfgPath, err)
+		log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
 	}
+
+	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(cfg)
+	_, _ = tlsrouter.NormalizeConfig(cfg)
 
 	// Use the bind address and port
 	addr := fmt.Sprintf("%s:%d", bind, port)
 	log.Printf("Listening on %s...", addr)
-	for _, site := range cfg {
-		fmt.Printf("   %s\n", site.Domain)
-		for _, t := range site.Targets {
-			fmt.Printf("      %s:%d (%s)\n", t.Addr, t.Port, strings.Join(t.ALPNs, ","))
+	for _, site := range cfg.TLSMatches {
+		snialpns := strings.Join(site.Domains, ",") + "; " + strings.Join(site.ALPNs, ",")
+		fmt.Printf("   %s\n", snialpns)
+		for _, b := range site.Backends {
+			fmt.Printf("      %s:%d\n", b.Address, b.Port)
 		}
 	}
 
 	lnCfg := tlsrouter.NewListenConfig(cfg)
-	log.Fatalf("Error:\n%s\n", lnCfg.ListenAndProxy(addr))
+	log.Fatalf("Server Error:\n%#v\n", lnCfg.ListenAndProxy(addr))
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
-func ReadConfig(filePath string) (tlsrouter.Config, error) {
+func ReadConfig(filePath string) (cfg tlsrouter.Config, err error) {
 	// Read the file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+		return cfg, fmt.Errorf("failed to read config file %s: %w", filePath, err)
 	}
 
-	var config tlsrouter.Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config JSON: %w", err)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("failed to parse config JSON: %w", err)
 	}
 
-	if err := tlsrouter.LintConfig(config); nil != err {
-		return nil, err
+	customAlpns := []string{"ssh"}
+	alpns := ianaalpn.Names
+
+	for _, alpn := range customAlpns {
+		if !slices.Contains(alpns, alpn) {
+			alpns = append(alpns, alpn)
+		}
 	}
 
-	return tlsrouter.NormalizeConfig(config), nil
+	if err := tlsrouter.LintConfig(cfg, alpns); nil != err {
+		return cfg, err
+	}
+
+	return cfg, nil
 }
