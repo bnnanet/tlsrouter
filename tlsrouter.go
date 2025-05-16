@@ -3,9 +3,11 @@ package tlsrouter
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -13,42 +15,75 @@ import (
 	"time"
 )
 
-type DomainConfig struct {
-	Domain    string         `json:"domain,omitempty"`
-	Targets   []TargetConfig `json:"targets"`
-	ACME      *struct{}      `json:"acme,omitempty"`       // TODO
-	TLSConfig *struct{}      `json:"tls_config,omitempty"` // TODO
+var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
+
+type ErrorNoTLSConfig string
+
+func (e ErrorNoTLSConfig) Error() string {
+	return string(e)
 }
 
-type TargetConfig struct {
-	ALPNs           []string `json:"alpns,omitempty"`
-	Addr            string   `json:"address,omitempty"` // TODO should resolve to private IP
-	Port            uint16   `json:"port,omitempty"`
-	TerminateTLS    bool     `json:"tls_terminate"`
+// Config holds the TLS routing configuration and hostname resolutions.
+type Config struct {
+	TLSMatches        []*TLSMatch       `json:"tls_matches"`
+	HostnameOverrides map[string]string `json:"hostname_overrides"`
+}
+
+// TLSMatch defines a rule for matching domains and ALPNs to backends.
+type TLSMatch struct {
+	Domains []string `json:"domains"`
+	ALPNs   []string `json:"alpns"`
+	// ALPNBackends map[string][]*Backend `json:"-"`
+	CurrentBackend *atomic.Uint32
+	Backends       []*Backend `json:"backends"`             // Standardizing on "backends"
+	ACME           *struct{}  `json:"acme,omitempty"`       // TODO
+	TLSConfig      *struct{}  `json:"tls_config,omitempty"` // TODO
+}
+
+// Backend defines a proxy destination.
+type Backend struct {
+	Address         string   `json:"address"`
+	Port            uint16   `json:"port"`
+	ALPNs           []string `json:"-"`
+	TerminateTLS    bool     `json:"terminates_tls"`
 	ConnectTLS      bool     `json:"connect_tls"`
 	ConnectInsecure bool     `json:"connect_insecure"`
-	// ConnectSNI  string
-	// ConnectALPNs  string
-	// ConnectCertRootPEMs [][]byte
+	// IsActive        bool     `json:"-"` // In-memory only
+	// activeMu        sync.RWMutex // Protects IsActive
+	// ConnectSNI         string   `json:"connect_sni,omitempty"`
+	// ConnectALPNs       string   `json:"connect_alpn,omitempty"`
+	// ConnectCertRootPEMs [][]byte `json:"connect_cert_root_pems,omitempty"`
 }
 
-type Config = map[string]DomainConfig
+type SNIALPN string
+
+func NewSNIALPN(sni, alpn string) SNIALPN {
+	return SNIALPN(sni + ">" + alpn)
+}
+
+// type Matchers map[string]TLSMatch
 
 type ListenConfig struct {
-	config  Config
-	context context.Context
-	cancel  func()
-	netConf net.ListenConfig
+	config          Config
+	alpnsByDomain   map[string][]string
+	configBySNIALPN map[SNIALPN]*TLSMatch
+	context         context.Context
+	update          chan struct{}
+	done            chan struct{}
+	cancel          func()
+	netConf         net.ListenConfig
 }
 
-func NewListenConfig(cfgs Config) *ListenConfig {
-	config := NormalizeConfig(cfgs)
+func NewListenConfig(cfg Config) *ListenConfig {
+	domainMatchers, snialpnMatchers := NormalizeConfig(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	lc := &ListenConfig{
-		config:  config,
-		context: ctx,
-		cancel:  cancel,
+		config:          cfg,
+		alpnsByDomain:   domainMatchers,
+		configBySNIALPN: snialpnMatchers,
+		context:         ctx,
+		cancel:          cancel,
 		netConf: net.ListenConfig{
 			Control: reusePort,
 		},
@@ -63,18 +98,37 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 }
 
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
+	ch := make(chan net.Conn)
+
 	netLn, err := lc.netConf.Listen(lc.context, "tcp", addr)
 	if err != nil {
 		return err
 	}
 
-	for {
-		conn, err := netLn.Accept()
-		if err != nil {
-			log.Printf("Error: %#v", err)
-			continue
+	go func() {
+		for {
+			conn, err := netLn.Accept()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "debug: error accepting client: %s\n", err)
+				continue
+			}
+			ch <- conn
 		}
-		go lc.proxy(conn)
+	}()
+
+	for {
+		select {
+		case conn := <-ch:
+			fmt.Fprintf(os.Stderr, "debug: proxy connection\n")
+			go lc.proxy(conn)
+		case <-lc.update:
+			fmt.Fprintf(os.Stderr, "debug: update config\n")
+			lc.done <- struct{}{}
+		case <-lc.done:
+			fmt.Fprintf(os.Stderr, "debug: stop server\n")
+			netLn.Close()
+			return nil
+		}
 	}
 }
 
@@ -83,59 +137,122 @@ func (lc *ListenConfig) proxy(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
+	var snialpn SNIALPN
+
 	hc := NewHelloConn(conn)
 	tlsConn := tls.Server(hc, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			fmt.Printf("ServerName (SNI): %s\n", hello.ServerName)
-			fmt.Printf("SupportedProtos (ALPN): %s\n", hello.SupportedProtos)
+			fmt.Fprintf(os.Stderr, "ServerName (SNI): %s\n", hello.ServerName)
+			fmt.Fprintf(os.Stderr, "SupportedProtos (ALPN): %s\n", hello.SupportedProtos)
 
 			domain := strings.ToLower(hello.ServerName)
-			cfg, exists := lc.config[domain]
+			alpns := hello.SupportedProtos
+			if len(alpns) == 0 {
+				alpns = append(alpns, "http/1.1")
+			}
+
+			// happy path, e.g. "example.com:h2"
+			snialpn = NewSNIALPN(domain, alpns[0])
+			cfg, exists := lc.configBySNIALPN[snialpn]
 			if !exists {
-				for {
-					nextDot := strings.IndexByte(domain, '.')
-					if nextDot == -1 {
-						return nil, fmt.Errorf("no matching domain found in config")
-					}
-
-					domain = domain[nextDot:]
-					if cfg, exists = lc.config[domain]; exists {
-						break
-					}
-
-					domain = domain[1:]
+				if len(alpns) > 1 {
+					// still happy path, e.g. "example.com:http/1.1"
+					snialpn = NewSNIALPN(domain, alpns[1])
+					cfg, exists = lc.configBySNIALPN[snialpn]
 				}
-
+				// unhappy path
 				if !exists {
-					return nil, fmt.Errorf("no matching domain found in config")
-				}
-			}
-
-			targets := []TargetConfig{}
-			for _, t := range cfg.Targets {
-				for _, alpn := range t.ALPNs {
-					if slices.Contains(hello.SupportedProtos, alpn) {
-						targets = append(targets, t)
-					} else if slices.Contains(hello.SupportedProtos, "*") {
-						targets = append(targets, t)
+					var err error
+					snialpn, cfg, err = lc.slowMatch(domain, alpns)
+					if err != nil {
+						return nil, err
 					}
 				}
 			}
 
-			if len(targets) == 0 {
-				return nil, fmt.Errorf("no target supports the given alpn")
+			// simple round robin
+			n := uint32(len(cfg.Backends))
+			b := cfg.Backends[cfg.CurrentBackend.Load()]
+			cfg.CurrentBackend.Add(1)
+			cfg.CurrentBackend.CompareAndSwap(n, 0)
+
+			if !b.TerminateTLS {
+				return nil, ErrorNoTLSConfig(fmt.Sprintf("found config %q", snialpn))
 			}
 
-			return nil, fmt.Errorf("found config %q", cfg.Domain)
+			return nil, ErrDoNotTerminate
 		},
 	})
+
+	// hc.Peeking = true
 	if err := tlsConn.Handshake(); err != nil {
-		log.Printf("TLS handshake error: %v", err)
+		var errNoCfg *ErrorNoTLSConfig
+		if errors.As(err, errNoCfg) {
+			hc.Conn.Close()
+			return
+		}
+
+		if errors.Is(err, ErrDoNotTerminate) {
+			// TODO pipe encrypted tls
+			hc.Conn.Close()
+			return
+		}
+
+		// TODO error log channel
+		log.Printf("tls handshake failed: %s", err)
+		hc.Conn.Close()
+		return
 	}
 
 	c := NewConn(hc)
-	log.Printf("%d", c.BytesRead.Load())
-	// TODO pipe
+	log.Printf("BytesRead: %d", c.BytesRead.Load())
+	// TODO pipe terminated (plaintext) conn
+}
+
+func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *TLSMatch, error) {
+	parentDomain := domain
+
+	// we already checked the first two, if any
+	if len(alpns) > 2 {
+		knownAlpns := lc.alpnsByDomain[domain]
+
+		for _, alpn := range alpns[2:] {
+			if slices.Contains(knownAlpns, alpn) {
+				snialpn := NewSNIALPN(domain, alpn)
+				return snialpn, lc.configBySNIALPN[snialpn], nil
+			}
+		}
+		if slices.Contains(knownAlpns, "*") {
+			snialpn := NewSNIALPN(domain, "*")
+			return snialpn, lc.configBySNIALPN[snialpn], nil
+		}
+	}
+
+	for {
+		nextDot := strings.IndexByte(domain, '.')
+		if nextDot == -1 {
+			return "", nil, fmt.Errorf(
+				"could not match domain %q to backend for any of %q",
+				parentDomain,
+				strings.Join(alpns, ", "),
+			)
+		}
+
+		domain = domain[nextDot:]
+		knownAlpns := lc.alpnsByDomain[domain]
+		for _, alpn := range alpns {
+			if slices.Contains(knownAlpns, alpn) {
+				snialpn := NewSNIALPN(domain, alpn)
+				return snialpn, lc.configBySNIALPN[snialpn], nil
+			}
+		}
+		if slices.Contains(knownAlpns, "*") {
+			snialpn := NewSNIALPN(domain, "*")
+			return snialpn, lc.configBySNIALPN[snialpn], nil
+		}
+
+		domain = domain[1:]
+	}
 }
 
 func NewConn(hc *HelloConn) *Conn {
@@ -202,7 +319,7 @@ func (hc *HelloConn) Read(b []byte) (int, error) {
 }
 
 func (hc *HelloConn) Write(b []byte) (int, error) {
-	fmt.Printf("Handshake: %x\n", b)
+	fmt.Fprintf(os.Stderr, "Handshake: %x\n", b)
 	return 0, fmt.Errorf("sanity fail: HelloConn does not support Write")
 }
 
@@ -210,67 +327,96 @@ func (hc *HelloConn) Close() error {
 	panic(fmt.Errorf("sanity fail: HelloConn does not support Close"))
 }
 
-func NormalizeConfig(cfgs Config) Config {
-	config := make(map[string]DomainConfig)
+func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
+	domainALPNMatchers := map[string][]string{}
+	snialpnMatchers := map[SNIALPN]*TLSMatch{}
 
-	for domain, cfg := range cfgs {
-		cfg.Domain = domain
-
-		// Example.com => example.com
-		domain = strings.ToLower(domain)
-
-		// *.example.com => .example.com
-		domain = strings.TrimPrefix(domain, "*")
-
-		for i, t := range cfg.Targets {
-			if len(t.ALPNs) == 0 {
-				t.ALPNs = []string{"h2", "http/1.1"}
-				// t.ALPNs = []string{"*"}
-			}
-			cfg.Targets[i] = t
+	for _, m := range cfg.TLSMatches {
+		if len(m.Backends) == 0 {
+			fmt.Println("debug: warn: empty backends")
+			continue
 		}
 
-		config[domain] = cfg
+		for _, domain := range m.Domains {
+			// Example.com => example.com
+			domain = strings.ToLower(domain)
+
+			// *.example.com => .example.com
+			domain = strings.TrimPrefix(domain, "*")
+
+			alpns := domainALPNMatchers[domain]
+			for _, alpn := range m.ALPNs {
+				if !slices.Contains(alpns, alpn) {
+					alpns = append(alpns, alpn)
+					domainALPNMatchers[domain] = alpns
+				}
+
+				snialpn := NewSNIALPN(domain, alpn)
+
+				tlsMatch := snialpnMatchers[snialpn]
+				if tlsMatch == nil {
+					tlsMatch = &TLSMatch{
+						CurrentBackend: new(atomic.Uint32),
+						ACME:           m.ACME,
+						TLSConfig:      m.TLSConfig,
+					}
+					snialpnMatchers[snialpn] = tlsMatch
+				}
+
+				tlsMatch.Backends = append(tlsMatch.Backends, m.Backends...)
+			}
+		}
 	}
 
-	return config
+	return domainALPNMatchers, snialpnMatchers
 }
 
-func LintConfig(cfgs Config) error {
-	if len(cfgs) == 0 {
-		return fmt.Errorf("empty config\n")
+func LintConfig(cfg Config, allowedAlpns []string) error {
+	if len(cfg.TLSMatches) == 0 {
+		return fmt.Errorf("error: 'tls_matches' is empty")
 	}
 
-	config := make(map[string]DomainConfig)
+	for _, match := range cfg.TLSMatches {
+		snialpns := strings.Join(match.Domains, ",") + "; " + strings.Join(match.ALPNs, ",")
 
-	for domain, cfg := range cfgs {
-		cfg.Domain = domain
-		domain = strings.ToLower(domain)
+		for _, domain := range match.Domains {
+			d := strings.ToLower(domain)
 
-		if domain != cfg.Domain {
-			return fmt.Errorf("invalid casing for for domain %q\n", cfg.Domain)
-		}
+			if domain != d {
+				return fmt.Errorf("lint: domain is not lowercase: %q\n", domain)
+			}
 
-		if _, exists := config[domain]; exists {
-			return fmt.Errorf("duplicate config entry for domain %q\n", cfg.Domain)
-		}
-
-		if strings.HasPrefix(domain, "*") {
-			if !strings.HasPrefix(domain, "*.") {
-				return fmt.Errorf("invalid domain %q", domain)
+			if strings.HasPrefix(domain, "*") {
+				if !strings.HasPrefix(domain, "*.") {
+					return fmt.Errorf("lint: invalid use of wildcard %q (must be '*.')", domain)
+				}
 			}
 		}
 
-		if len(cfg.Targets) == 0 {
-			return fmt.Errorf("domain %q has no 'targets' defined", domain)
+		if len(allowedAlpns) > 0 {
+			for _, alpn := range match.ALPNs {
+				if !slices.Contains(allowedAlpns, alpn) {
+					if alpn != "*" {
+						return fmt.Errorf("lint: unknown alpn %q", alpn)
+					}
+				}
+			}
 		}
 
-		for i, host := range cfg.Targets {
-			if host.Addr == "" {
-				return fmt.Errorf("target %d in domain %q has empty 'address'", i, domain)
+		if len(match.ALPNs) == 0 {
+			return fmt.Errorf("domains set %q have no 'alpns' defined", snialpns)
+		}
+
+		if len(match.Backends) == 0 {
+			return fmt.Errorf("domains+alpns set %q have no 'backends' defined", snialpns)
+		}
+
+		for i, b := range match.Backends {
+			if b.Address == "" {
+				return fmt.Errorf("target %d in set %q has empty 'address'", i, snialpns)
 			}
-			if host.Port == 0 {
-				return fmt.Errorf("target %d in domain %q has empty 'port'", i, domain)
+			if b.Port == 0 {
+				return fmt.Errorf("target %d in set %q has empty 'port'", i, snialpns)
 			}
 		}
 	}
