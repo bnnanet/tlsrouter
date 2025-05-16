@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -42,9 +44,11 @@ type TLSMatch struct {
 
 // Backend defines a proxy destination.
 type Backend struct {
+	Host            string   `json:"-"`
 	Address         string   `json:"address"`
 	Port            uint16   `json:"port"`
 	ALPNs           []string `json:"-"`
+	PROXYProto      int      `json:"proxy_protocol,omitempty"`
 	TerminateTLS    bool     `json:"terminates_tls"`
 	ConnectTLS      bool     `json:"connect_tls"`
 	ConnectInsecure bool     `json:"connect_insecure"`
@@ -67,7 +71,7 @@ type ListenConfig struct {
 	config          Config
 	alpnsByDomain   map[string][]string
 	configBySNIALPN map[SNIALPN]*TLSMatch
-	context         context.Context
+	Context         context.Context
 	update          chan struct{}
 	done            chan struct{}
 	cancel          func()
@@ -82,7 +86,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		config:          cfg,
 		alpnsByDomain:   domainMatchers,
 		configBySNIALPN: snialpnMatchers,
-		context:         ctx,
+		Context:         ctx,
 		cancel:          cancel,
 		netConf: net.ListenConfig{
 			Control: reusePort,
@@ -100,7 +104,7 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
-	netLn, err := lc.netConf.Listen(lc.context, "tcp", addr)
+	netLn, err := lc.netConf.Listen(lc.Context, "tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -120,7 +124,10 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 		select {
 		case conn := <-ch:
 			fmt.Fprintf(os.Stderr, "debug: proxy connection\n")
-			go lc.proxy(conn)
+			go func() {
+				_, _, _ = lc.proxy(conn)
+				// TODO log to error channel
+			}()
 		case <-lc.update:
 			fmt.Fprintf(os.Stderr, "debug: update config\n")
 			lc.done <- struct{}{}
@@ -132,14 +139,17 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	}
 }
 
-func (lc *ListenConfig) proxy(conn net.Conn) {
+func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	defer func() {
 		_ = conn.Close()
 	}()
 
 	var snialpn SNIALPN
+	var beConn net.Conn
+	var backend Backend
 
-	hc := NewHelloConn(conn)
+	hc := newHelloConn(conn)
+	// tlsConn.NetConn()
 	tlsConn := tls.Server(hc, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			fmt.Fprintf(os.Stderr, "ServerName (SNI): %s\n", hello.ServerName)
@@ -170,43 +180,194 @@ func (lc *ListenConfig) proxy(conn net.Conn) {
 				}
 			}
 
-			// simple round robin
-			n := uint32(len(cfg.Backends))
-			b := cfg.Backends[cfg.CurrentBackend.Load()]
-			cfg.CurrentBackend.Add(1)
-			cfg.CurrentBackend.CompareAndSwap(n, 0)
-
-			if !b.TerminateTLS {
-				return nil, ErrorNoTLSConfig(fmt.Sprintf("found config %q", snialpn))
+			for {
+				// simple round robin
+				n := uint32(len(cfg.Backends))
+				backend := cfg.Backends[cfg.CurrentBackend.Load()]
+				cfg.CurrentBackend.Add(1)
+				cfg.CurrentBackend.CompareAndSwap(n, 0)
+				var err error
+				// ctx, cancel := context.WithCancel(lc.Context)
+				beConn, err = getBackendConn(lc.Context, backend.Host)
+				if err != nil {
+					// TODO mark as inactive and try next
+					return nil, fmt.Errorf("could not connect to backend %q", backend.Host)
+				}
+				if beConn != nil {
+					break
+				}
 			}
 
-			return nil, ErrDoNotTerminate
+			if !backend.TerminateTLS {
+				return nil, ErrDoNotTerminate
+			}
+
+			_ = hc.Passthru()
+			panic(fmt.Errorf("found config %q but termination is not implemented", snialpn))
 		},
 	})
 
-	// hc.Peeking = true
 	if err := tlsConn.Handshake(); err != nil {
-		var errNoCfg *ErrorNoTLSConfig
-		if errors.As(err, errNoCfg) {
-			hc.Conn.Close()
-			return
+		if errors.Is(err, ErrDoNotTerminate) {
+			return hc.copyConn(beConn)
 		}
 
-		if errors.Is(err, ErrDoNotTerminate) {
-			// TODO pipe encrypted tls
-			hc.Conn.Close()
-			return
+		var errNoCfg ErrorNoTLSConfig
+		if errors.As(err, &errNoCfg) {
+			// TODO error log channel
+			log.Printf("no tls config: %s", err)
+			return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
 		}
 
 		// TODO error log channel
-		log.Printf("tls handshake failed: %s", err)
-		hc.Conn.Close()
-		return
+		log.Printf("unknown tls failure: %s", err)
+		return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
 	}
 
-	c := NewConn(hc)
-	log.Printf("BytesRead: %d", c.BytesRead.Load())
-	// TODO pipe terminated (plaintext) conn
+	_ = hc.Passthru()
+	if backend.PROXYProto > 0 {
+		panic(fmt.Errorf("PROXY protocol is not implemented yet"))
+	}
+
+	cConn := NewTLSConn(tlsConn)
+	_, _, retErr = CopyConn(cConn, beConn)
+	return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), retErr
+}
+
+// CopyConn is a bi-directional copy, calling io.Copy for both connections
+func CopyConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr error) {
+	var rErr error
+	var wErr error
+
+	defer func() {
+		if rErr != nil {
+			retErr = rErr
+		} else if wErr != nil {
+			retErr = wErr
+		}
+
+		_ = cConn.Close()
+		_ = beConn.Close()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		var err error
+		r, err = io.Copy(beConn, cConn)
+		if err != nil {
+			rErr = err
+			fmt.Fprintf(os.Stderr, "debug: error copying client to backend: %v\n", err)
+		}
+
+		if c, ok := beConn.(*net.TCPConn); ok {
+			_ = c.CloseWrite()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		var err error
+		w, err = io.Copy(cConn, beConn)
+		if err != nil {
+			wErr = err
+			fmt.Fprintf(os.Stderr, "debug: error copying backend to client: %v\n", err)
+		}
+
+		if c, ok := cConn.(*net.TCPConn); ok {
+			_ = c.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
+
+	return r, w, retErr
+}
+
+func (hc *tlsHelloConn) copyConn(beConn net.Conn) (r int64, w int64, retErr error) {
+	var rErr error
+	var wErr error
+
+	defer func() {
+		if rErr != nil {
+			retErr = rErr
+		} else if wErr != nil {
+			retErr = wErr
+		}
+
+		_ = hc.Close()
+		_ = beConn.Close()
+	}()
+
+	conn := hc.Conn
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	buffers := hc.Passthru()
+	go func() {
+		defer wg.Done()
+
+		// copy peeked data
+		for _, buf := range buffers {
+			_, _ = beConn.Write(buf)
+		}
+		buffers = nil
+
+		_, err := io.Copy(beConn, conn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "debug: error copying client to backend: %v\n", err)
+		}
+
+		if c, ok := beConn.(*net.TCPConn); ok {
+			_ = c.CloseWrite()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		_, err := io.Copy(conn, beConn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "debug: error copying backend to client: %v\n", err)
+		}
+
+		if c, ok := conn.(*net.TCPConn); ok {
+			_ = c.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
+
+	return r, w, retErr
+}
+
+func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
+	d := net.Dialer{
+		Timeout:       3 * time.Second,
+		LocalAddr:     nil,
+		FallbackDelay: 300 * time.Millisecond,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     15 * time.Second,
+			Interval: 15 * time.Second,
+			Count:    9,
+		},
+		Resolver:       nil,
+		ControlContext: nil,
+		//ignored
+		// Deadline: time.Time,
+		// KeepAlive:     15 * time.Second,
+		//deprecated
+		// Control: nil,
+		// DualStack: true,
+		// Cancel: nil,
+	}
+
+	return d.DialContext(ctx, "tcp", backendAddr)
 }
 
 func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *TLSMatch, error) {
@@ -231,11 +392,11 @@ func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *TLSM
 	for {
 		nextDot := strings.IndexByte(domain, '.')
 		if nextDot == -1 {
-			return "", nil, fmt.Errorf(
-				"could not match domain %q to backend for any of %q",
+			return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
+				"no tls config matched for domain %q to backend for any of %q",
 				parentDomain,
 				strings.Join(alpns, ", "),
-			)
+			))
 		}
 
 		domain = domain[nextDot:]
@@ -255,76 +416,93 @@ func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *TLSM
 	}
 }
 
-func NewConn(hc *HelloConn) *Conn {
-	c := &Conn{
-		Conn:         hc.Conn,
-		buffers:      nil,
+func newHelloConn(nc net.Conn) *tlsHelloConn {
+	c := &tlsHelloConn{
+		Conn:         nc,
+		buffers:      make([][]byte, 0, 1),
+		passthru:     false,
 		Connected:    time.Now(),
 		BytesRead:    new(atomic.Uint64),
 		BytesWritten: new(atomic.Uint64),
-	}
-	if len(hc.buffers) > 0 {
-		c.buffers = hc.buffers
-		for _, b := range hc.buffers {
-			_ = c.BytesRead.Add(uint64(len(b)))
-		}
 	}
 
 	return c
 }
 
-type Conn struct {
+type tlsHelloConn struct {
 	net.Conn
+	passthru     bool
 	buffers      [][]byte
 	Connected    time.Time
 	BytesRead    *atomic.Uint64
 	BytesWritten *atomic.Uint64
 }
 
-func (c *Conn) Read(b []byte) (int, error) {
-	if c.buffers == nil {
-		n, err := c.Conn.Read(b)
-		_ = c.BytesRead.Add(uint64(n))
+func (hc *tlsHelloConn) Passthru() [][]byte {
+	bufs := hc.buffers
+	hc.buffers = nil
+	hc.passthru = true
+	return bufs
+}
+
+func (hc *tlsHelloConn) Read(b []byte) (int, error) {
+	n, err := hc.Conn.Read(b)
+	hc.BytesRead.Add(uint64(n))
+	if hc.passthru {
 		return n, err
 	}
 
-	buf := c.buffers[0]
-	c.buffers = c.buffers[1:]
-	if len(c.buffers) == 0 {
-		c.buffers = nil
-	}
-	n := len(buf)
-	copy(b, buf)
-	return n, nil
+	hc.buffers = append(hc.buffers, b[0:n])
+	return n, err
 }
 
-func NewHelloConn(nc net.Conn) *HelloConn {
-	c := &HelloConn{
-		Conn:    nc,
-		buffers: make([][]byte, 0, 1),
+func (hc *tlsHelloConn) Write(b []byte) (int, error) {
+	if hc.passthru {
+		n, err := hc.Conn.Write(b)
+		hc.BytesWritten.Add(uint64(n))
+		return n, err
+	}
+
+	fmt.Fprintf(os.Stderr, "Handshake: %x\n", b)
+	return 0, fmt.Errorf("sanity fail: tlsHelloConn does not support Write")
+}
+
+func (hc *tlsHelloConn) Close() error {
+	if hc.passthru {
+		return hc.Conn.Close()
+	}
+
+	panic(fmt.Errorf("sanity fail: tlsHelloConn does not support Close"))
+}
+
+type TLSConn struct {
+	*tls.Conn
+	Connected    time.Time
+	BytesRead    *atomic.Uint64
+	BytesWritten *atomic.Uint64
+}
+
+func NewTLSConn(tc *tls.Conn) *TLSConn {
+	c := &TLSConn{
+		Conn:         tc,
+		Connected:    time.Now(),
+		BytesRead:    new(atomic.Uint64),
+		BytesWritten: new(atomic.Uint64),
 	}
 
 	return c
 }
 
-type HelloConn struct {
-	net.Conn
-	buffers [][]byte
-}
-
-func (hc *HelloConn) Read(b []byte) (int, error) {
-	n, err := hc.Conn.Read(b)
-	hc.buffers = append(hc.buffers, b[0:n])
+func (tc *TLSConn) Read(b []byte) (int, error) {
+	n, err := tc.Conn.Read(b)
+	tc.BytesRead.Add(uint64(n))
 	return n, err
 }
 
-func (hc *HelloConn) Write(b []byte) (int, error) {
-	fmt.Fprintf(os.Stderr, "Handshake: %x\n", b)
-	return 0, fmt.Errorf("sanity fail: HelloConn does not support Write")
-}
-
-func (hc *HelloConn) Close() error {
-	panic(fmt.Errorf("sanity fail: HelloConn does not support Close"))
+func (tc *TLSConn) Write(b []byte) (int, error) {
+	n, err := tc.Conn.Write(b)
+	tc.BytesWritten.Add(uint64(n))
+	return n, err
 }
 
 func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
@@ -363,7 +541,10 @@ func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 					snialpnMatchers[snialpn] = tlsMatch
 				}
 
-				tlsMatch.Backends = append(tlsMatch.Backends, m.Backends...)
+				for _, b := range m.Backends {
+					b.Host = fmt.Sprintf("%s:%d", b.Address, b.Port)
+					tlsMatch.Backends = append(tlsMatch.Backends, b)
+				}
 			}
 		}
 	}
