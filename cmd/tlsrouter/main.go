@@ -57,7 +57,7 @@ func main() {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			defaultPort = p
 		} else {
-			log.Printf("Invalid PORT environment variable value: %s, using default or flag value", envPort)
+			log.Printf("warn: invalid PORT environment variable value: %s, using default or flag value\n", envPort)
 		}
 	}
 	port := defaultPort
@@ -75,7 +75,7 @@ func main() {
 		printVersion()
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "USAGE\n")
-		fmt.Fprintf(os.Stderr, "   tlsrouter [options] <url>\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter [options]\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "EXAMPLES\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter --bind 0.0.0.0 --port 443\n")
@@ -100,7 +100,7 @@ func main() {
 		}
 	}
 	if err := mainFlags.Parse(os.Args[1:]); err != nil {
-		fmt.Println(err)
+		fmt.Fprintf(os.Stderr, "%s\n", err)
 
 		mainFlags.Usage()
 		os.Exit(1)
@@ -115,7 +115,7 @@ func main() {
 
 	// Use the bind address and port
 	addr := fmt.Sprintf("%s:%d", bind, port)
-	log.Printf("Listening on %s...\n", addr)
+	log.Printf("Listening on %s...", addr)
 
 	log.Fatal(tlsrouter.Listen(addr))
 }
