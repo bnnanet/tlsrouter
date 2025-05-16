@@ -61,7 +61,7 @@ func main() {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			defaultPort = p
 		} else {
-			log.Printf("warn: invalid PORT environment variable value: %s, using default or flag value\n", envPort)
+			fmt.Fprintf(os.Stderr, "warn: invalid PORT environment variable value: %s, using default or flag value\n", envPort)
 		}
 	}
 	port := defaultPort
