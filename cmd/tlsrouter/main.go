@@ -12,6 +12,8 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
+
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -50,6 +52,7 @@ func printVersion() {
 }
 
 func main() {
+	godotenv.Load(".env")
 	mainFlags := flag.NewFlagSet("", flag.ContinueOnError)
 
 	var showVersion bool

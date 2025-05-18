@@ -9,12 +9,17 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/caddyserver/certmagic"
+	"github.com/libdns/duckdns"
+	"github.com/mholt/acmez/v3"
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
@@ -29,6 +34,7 @@ func (e ErrorNoTLSConfig) Error() string {
 type Config struct {
 	TLSMatches        []*TLSMatch       `json:"tls_matches"`
 	HostnameOverrides map[string]string `json:"hostname_overrides"`
+	certmagicStorage  certmagic.Storage `json:"-"` // TODO
 }
 
 // TLSMatch defines a rule for matching domains and ALPNs to backends.
@@ -65,6 +71,24 @@ func NewSNIALPN(sni, alpn string) SNIALPN {
 	return SNIALPN(sni + ">" + alpn)
 }
 
+// ALPN returns the ALPN part of the SNIALPN (after ">")
+func (s SNIALPN) ALPN() string {
+	parts := strings.SplitN(string(s), ">", 2)
+	if len(parts) < 2 {
+		return "" // No ALPN part (malformed)
+	}
+	return parts[1]
+}
+
+// SNI returns the SNI part of the SNIALPN (before ">")
+func (s SNIALPN) SNI() string {
+	parts := strings.SplitN(string(s), ">", 2)
+	if len(parts) < 1 {
+		return "" // Shouldn't happen (empty string)
+	}
+	return parts[0]
+}
+
 // type Matchers map[string]TLSMatch
 
 type ListenConfig struct {
@@ -72,6 +96,7 @@ type ListenConfig struct {
 	alpnsByDomain   map[string][]string
 	configBySNIALPN map[SNIALPN]*TLSMatch
 	Context         context.Context
+	certmagic       *certmagic.Config
 	update          chan struct{}
 	done            chan struct{}
 	cancel          func()
@@ -88,11 +113,88 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		configBySNIALPN: snialpnMatchers,
 		Context:         ctx,
 		cancel:          cancel,
+		certmagic:       newCertmagic(cfg),
 		netConf: net.ListenConfig{
 			Control: reusePort,
 		},
 	}
 	return lc
+}
+
+func newCertmagic(cfg Config) *certmagic.Config {
+
+	certmagicConfMap := &sync.Map{}
+
+	certmagicCache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
+			// TODO add option to config to determine SANs (SubjectAltNames)
+			primaryDNSName := cert.Names[0]
+
+			cmCfgAny, ok := certmagicConfMap.Load(primaryDNSName)
+			if !ok {
+				return nil, fmt.Errorf("config not found")
+			}
+			cmCfg := cmCfgAny.(*certmagic.Config)
+			return cmCfg, nil
+		},
+		Logger: certmagic.Default.Logger,
+	})
+
+	var certmagicStorage certmagic.Storage = &certmagic.FileStorage{Path: certmagicDataDir()}
+	if cfg.certmagicStorage != nil {
+		certmagicStorage = cfg.certmagicStorage
+	}
+
+	config := certmagic.New(certmagicCache, certmagic.Config{
+		RenewalWindowRatio: 0.3,
+		OnEvent: func(ctx context.Context, eventName string, data map[string]any) error {
+			if eventName != "cert_obtaining" {
+				return nil
+			}
+
+			// data
+			// renewal bool: Whether this is a renewal
+			// identifier string: The name on the certificate
+			// forced bool: Whether renewal is being forced (if renewal)
+			// remaining time.Time: Time left on the certificate (if renewal)
+			// issuer certmagic.Issuer: The previous or current issuer
+
+			return nil // TODO
+		},
+		Storage: certmagicStorage,
+	})
+
+	myACME := certmagic.NewACMEIssuer(config, certmagic.ACMEIssuer{
+		CA: certmagic.LetsEncryptStagingCA,
+		// Email:                   os.Getenv("DUCKDNS_EMAIL"), // TODO XXX TODO TODO
+		Agreed:                  true,
+		DisableHTTPChallenge:    true,
+		DisableTLSALPNChallenge: true,
+		DNS01Solver: &certmagic.DNS01Solver{
+			DNSManager: certmagic.DNSManager{
+				DNSProvider: &duckdns.Provider{
+					APIToken: os.Getenv("DUCKDNS_APITOKEN"),
+				},
+			},
+		},
+		// plus any other customizations you need
+	})
+
+	config.Issuers = []certmagic.Issuer{myACME}
+
+	return config
+}
+
+func certmagicDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	baseDir := filepath.Join(home, ".local", "share")
+	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+		baseDir = xdgData
+	}
+	return filepath.Join(baseDir, "tlsrouter")
 }
 
 func reusePort(network, address string, conn syscall.RawConn) error {
@@ -161,6 +263,12 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				alpns = append(alpns, "http/1.1")
 			}
 
+			if alpns[0] == acmez.ACMETLS1Protocol {
+				// XXX TODO TODO TODO
+				// iterate over ALL backends and if ANY are terminated, terminate
+				panic("tls-apln challenge not supported yet")
+			}
+
 			// happy path, e.g. "example.com:h2"
 			snialpn = NewSNIALPN(domain, alpns[0])
 			cfg, exists := lc.configBySNIALPN[snialpn]
@@ -180,12 +288,14 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				}
 			}
 
+			var inc uint32 = 1
 			for {
 				// simple round robin
-				n := uint32(len(cfg.Backends))
+				n := uint32(len(cfg.Backends)) - inc
 				backend := cfg.Backends[cfg.CurrentBackend.Load()]
-				cfg.CurrentBackend.Add(1)
-				cfg.CurrentBackend.CompareAndSwap(n, 0)
+				if !cfg.CurrentBackend.CompareAndSwap(n, 0) {
+					cfg.CurrentBackend.Add(inc)
+				}
 				var err error
 				// ctx, cancel := context.WithCancel(lc.Context)
 				beConn, err = getBackendConn(lc.Context, backend.Host)
@@ -203,7 +313,14 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			_ = hc.Passthru()
-			panic(fmt.Errorf("found config %q but termination is not implemented", snialpn))
+
+			// TODO check snialpn support wildcards via config
+			// TODO get the cert directly
+			// TODO preconfigure as map on load
+			return &tls.Config{
+				GetCertificate: lc.certmagic.GetCertificate,
+				NextProtos:     []string{snialpn.ALPN()},
+			}, nil
 		},
 	})
 
@@ -354,7 +471,7 @@ func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
 			Enable:   true,
 			Idle:     15 * time.Second,
 			Interval: 15 * time.Second,
-			Count:    9,
+			Count:    2, // default 9 (2m 15s)
 		},
 		Resolver:       nil,
 		ControlContext: nil,
