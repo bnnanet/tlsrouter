@@ -111,9 +111,9 @@ type ListenConfig struct {
 	Context                 context.Context
 	ACMEDirectoryEndpoint   string
 	DisableTLSALPNChallenge bool
-	issuerConfMap           *sync.Map
+	issuerConfMap           map[string]*ACMEConfig
 	certmagicTLSOnly        *certmagic.Config
-	certmagicConfMap        *sync.Map
+	certmagicConfMap        map[string]*certmagic.Config
 	certmagicCache          *certmagic.Cache
 	certmagicStorage        certmagic.Storage
 	update                  chan struct{}
@@ -127,19 +127,18 @@ func NewListenConfig(cfg Config) *ListenConfig {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	issuerConfMap := &sync.Map{}
-	certmagicConfMap := &sync.Map{}
+	issuerConfMap := make(map[string]*ACMEConfig)
+	certmagicConfMap := make(map[string]*certmagic.Config)
 	certmagicStorage := cfg.certmagicStorage
 	if certmagicStorage == nil {
 		certmagicStorage = &certmagic.FileStorage{Path: certmagicDataDir()}
 	}
 	certmagicCache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
-			magicAny, exists := certmagicConfMap.Load(cert.Names[0]) // len(Names) > 0 is guaranteed
+			magic, exists := certmagicConfMap[cert.Names[0]] // len(Names) > 0 is guaranteed
 			if !exists {
 				return nil, fmt.Errorf("impossible error: pre-configured domain %q is no longer configured", strings.Join(cert.Names, ", "))
 			}
-			magic := magicAny.(*certmagic.Config)
 			return magic, nil
 		},
 		Logger: certmagic.Default.Logger,
@@ -184,7 +183,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		}
 
 		for _, domain := range acmeConf.Domains {
-			issuerConfMap.Store(domain, acmeConf)
+			issuerConfMap[domain] = acmeConf
 		}
 	}
 
@@ -202,7 +201,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 
 			var magic *certmagic.Config
 			domain := snialpn.SNI()
-			acmeConfAny, exists := issuerConfMap.Load(domain)
+			acmeConf, exists := issuerConfMap[domain]
 			if !exists {
 				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (TLS-ALPN)\n", snialpn)
 				// note: certmagic doesn't support multi-SAN
@@ -213,14 +212,13 @@ func NewListenConfig(cfg Config) *ListenConfig {
 			}
 			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
 
-			acmeConf := acmeConfAny.(*ACMEConfig)
-			if _, exists := lc.certmagicConfMap.Load(domain); exists {
+			if _, exists := lc.certmagicConfMap[domain]; exists {
 				continue
 			}
 
 			magic = lc.newCertmagic(acmeConf.DNSProvider)
 			for _, d := range acmeConf.Domains {
-				lc.certmagicConfMap.Store(d, magic)
+				lc.certmagicConfMap[d] = magic
 			}
 			// note: certmagic doesn't support multi-SAN
 			if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
@@ -458,11 +456,10 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			fmt.Println("DEBUG: TERMINATE THE TLS!!")
 			_ = hc.Passthru()
 
-			magicAny, exists := lc.certmagicConfMap.Load(domain)
+			magic, exists := lc.certmagicConfMap[domain]
 			if !exists {
 				panic(fmt.Errorf("impossible error: missing certmagic config configured domain"))
 			}
-			magic := magicAny.(*certmagic.Config)
 
 			// TODO check snialpn support wildcards via config
 			// TODO get the cert directly
