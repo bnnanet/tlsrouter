@@ -122,10 +122,14 @@ type ListenConfig struct {
 	certmagicConfMap        map[string]*certmagic.Config
 	certmagicCache          *certmagic.Cache
 	certmagicStorage        certmagic.Storage
-	update                  chan struct{}
 	done                    chan struct{}
-	cancel                  func()
+	Close                   func()
 	netConf                 net.ListenConfig
+}
+
+// TODO move to *Listener
+func (lc *ListenConfig) Shutdown() {
+	lc.done <- struct{}{}
 }
 
 func NewListenConfig(cfg Config) *ListenConfig {
@@ -161,7 +165,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		alpnsByDomain:           domainMatchers,
 		configBySNIALPN:         snialpnMatchers,
 		Context:                 ctx,
-		cancel:                  cancel,
+		Close:                   cancel,
 		ACMEDirectoryEndpoint:   directoryEndpoint,
 		issuerConfMap:           issuerConfMap,
 		DisableTLSALPNChallenge: false,
@@ -169,6 +173,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		certmagicConfMap:        certmagicConfMap,
 		certmagicStorage:        certmagicStorage,
 		certmagicCache:          certmagicCache,
+		done:                    make(chan struct{}),
 		netConf: net.ListenConfig{
 			Control: reusePort,
 		},
@@ -420,9 +425,13 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 		for {
 			conn, err := netLn.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					break
+				}
 				fmt.Fprintf(os.Stderr, "debug: error accepting client: %s\n", err)
 				continue
 			}
+
 			ch <- conn
 		}
 	}()
@@ -435,11 +444,10 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 				_, _, _ = lc.proxy(conn)
 				// TODO log to error channel
 			}()
-		case <-lc.update:
-			fmt.Fprintf(os.Stderr, "debug: update config\n")
+		case <-lc.Context.Done():
 			lc.done <- struct{}{}
 		case <-lc.done:
-			fmt.Fprintf(os.Stderr, "debug: stop server\n")
+			fmt.Fprintf(os.Stderr, "\n[[[[debug: stop server]]]]\n\n")
 			netLn.Close()
 			return nil
 		}
