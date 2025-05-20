@@ -24,6 +24,7 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
+	proxyproto "github.com/pires/go-proxyproto"
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
@@ -229,6 +230,11 @@ func NewListenConfig(cfg Config) *ListenConfig {
 				if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 				}
+			}
+
+			if backend.PROXYProto > 0 {
+				// cannot have backend.ForceHTTP with PROXYProto
+				continue
 			}
 
 			alpn := snialpn.ALPN()
@@ -458,6 +464,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	var snialpn SNIALPN
 	var beConn net.Conn
 	var backend *Backend
+	fmt.Fprintf(os.Stderr, "\n")
 
 	hc := newHelloConn(conn)
 	// tlsConn.NetConn()
@@ -509,17 +516,19 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				if !cfg.CurrentBackend.CompareAndSwap(n, 0) {
 					cfg.CurrentBackend.Add(inc)
 				}
+				if b.netProxy == nil && b.PROXYProto == 0 {
+					backend = b
+					break
+				}
 				var err error
-				if b.netProxy != nil {
-					beConn, err = getBackendConn(lc.Context, b.Host)
-					if err != nil {
-						// TODO mark as inactive and try next
-						return nil, fmt.Errorf("could not connect to backend %q", backend.Host)
-					}
-					if beConn != nil {
-						backend = b
-						break
-					}
+				beConn, err = getBackendConn(lc.Context, b.Host)
+				if err != nil {
+					// TODO mark as inactive and try next
+					return nil, fmt.Errorf("could not connect to backend %q", b.Host)
+				}
+				if beConn != nil {
+					backend = b
+					break
 				}
 			}
 
@@ -550,6 +559,18 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	if err := tlsConn.Handshake(); err != nil {
 		if errors.Is(err, ErrDoNotTerminate) {
 			fmt.Println("DEBUG 1: No terminate TLS...")
+			if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
+				header := &proxyproto.Header{
+					Version:           byte(backend.PROXYProto),
+					Command:           proxyproto.PROXY,
+					TransportProtocol: proxyproto.TCPv4,
+					SourceAddr:        tlsConn.RemoteAddr().(*net.TCPAddr),
+					DestinationAddr:   beConn.LocalAddr().(*net.TCPAddr),
+				}
+				if _, err = header.WriteTo(beConn); err != nil {
+					return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
+				}
+			}
 			return hc.copyConn(beConn)
 		}
 
@@ -565,19 +586,34 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
 	}
 
+	fmt.Println("do the next thing...")
 	_ = hc.Passthru() // Why call this here too?
-	if backend.PROXYProto > 0 {
-		panic(fmt.Errorf("PROXY protocol is not implemented yet"))
+	if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
+		fmt.Println("PROXY PROTO...")
+		header := &proxyproto.Header{
+			Version:           byte(backend.PROXYProto),
+			Command:           proxyproto.PROXY,
+			TransportProtocol: proxyproto.TCPv4,
+			SourceAddr:        tlsConn.RemoteAddr().(*net.TCPAddr),
+			DestinationAddr:   beConn.LocalAddr().(*net.TCPAddr),
+		}
+		if _, err := header.WriteTo(beConn); err != nil {
+			return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
+		}
 	}
 
+	fmt.Println("PLAIN CONN...")
 	cConn := NewTLSConn(tlsConn)
 	if backend.netProxy != nil {
+		fmt.Println("backend.netProxy.Offer")
 		// doesn't block
 		retErr = backend.netProxy.Offer(cConn)
 	} else {
+		fmt.Println("CopyConn(cConn, beConn)")
 		_, _, retErr = CopyConn(cConn, beConn)
 		_ = conn.Close()
 	}
+	fmt.Println("done")
 	return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), retErr
 }
 
