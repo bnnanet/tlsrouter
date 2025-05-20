@@ -8,6 +8,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,12 +20,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bnnanet/tlsrouter/netproxy"
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
+var proxyCfg = netproxy.ListenConfig{}
 
 type ErrorNoTLSConfig string
 
@@ -63,16 +68,17 @@ type ACMEConfig struct {
 
 // Backend defines a proxy destination.
 type Backend struct {
+	// Active          *atomic.Bool `json:"-"`
 	Host            string   `json:"-"`
 	Address         string   `json:"address"`
 	Port            uint16   `json:"port"`
 	ALPNs           []string `json:"-"`
-	PROXYProto      int      `json:"proxy_protocol,omitempty"`
-	TerminateTLS    bool     `json:"terminate_tls"`
-	ConnectTLS      bool     `json:"connect_tls"`
-	ConnectInsecure bool     `json:"connect_insecure"`
-	// IsActive        bool     `json:"-"` // In-memory only
-	// activeMu        sync.RWMutex // Protects IsActive
+	netProxy        *netproxy.Listener
+	PROXYProto      int  `json:"proxy_protocol,omitempty"`
+	TerminateTLS    bool `json:"terminate_tls"`
+	ForceHTTP       bool `json:"force_http,omitempty"`
+	ConnectTLS      bool `json:"connect_tls"`
+	ConnectInsecure bool `json:"connect_insecure"`
 	// ConnectSNI         string   `json:"connect_sni,omitempty"`
 	// ConnectALPNs       string   `json:"connect_alpn,omitempty"`
 	// ConnectCertRootPEMs [][]byte `json:"connect_cert_root_pems,omitempty"`
@@ -199,7 +205,6 @@ func NewListenConfig(cfg Config) *ListenConfig {
 				continue
 			}
 
-			var magic *certmagic.Config
 			domain := snialpn.SNI()
 			acmeConf, exists := issuerConfMap[domain]
 			if !exists {
@@ -212,17 +217,83 @@ func NewListenConfig(cfg Config) *ListenConfig {
 			}
 			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
 
-			if _, exists := lc.certmagicConfMap[domain]; exists {
-				continue
+			if _, exists := lc.certmagicConfMap[domain]; !exists {
+				magic := lc.newCertmagic(acmeConf.DNSProvider)
+				for _, d := range acmeConf.Domains {
+					lc.certmagicConfMap[d] = magic
+				}
+				// note: certmagic doesn't support multi-SAN
+				if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
+					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+				}
 			}
 
-			magic = lc.newCertmagic(acmeConf.DNSProvider)
-			for _, d := range acmeConf.Domains {
-				lc.certmagicConfMap[d] = magic
-			}
-			// note: certmagic doesn't support multi-SAN
-			if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
-				fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+			alpn := snialpn.ALPN()
+			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
+				var err error
+				if backend.netProxy, err = proxyCfg.Listen(lc.Context); err != nil {
+					panic(fmt.Errorf("listener should not be closed when starting: %w", err))
+				}
+
+				target := &url.URL{
+					Scheme: "http",
+					Host:   backend.Host,
+				}
+				if backend.ConnectTLS {
+					target.Scheme = "https"
+				}
+
+				proxy := &httputil.ReverseProxy{
+					Rewrite: func(r *httputil.ProxyRequest) {
+						r.SetURL(target)
+						r.Out.Host = r.In.Host // preserve Host header
+						r.SetXForwarded()
+					},
+				}
+
+				protocols := &http.Protocols{}
+				protocols.SetHTTP1(true)
+				protocols.SetHTTP2(true)
+				protocols.SetUnencryptedHTTP2(true)
+
+				// default transport https://pkg.go.dev/net/http#DefaultTransport
+				dialer := &net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}
+				transport := &http.Transport{
+					Proxy:                 http.ProxyFromEnvironment,
+					DialContext:           dialer.DialContext,
+					ForceAttemptHTTP2:     true,
+					MaxIdleConns:          100,
+					IdleConnTimeout:       90 * time.Second,
+					TLSHandshakeTimeout:   10 * time.Second,
+					ExpectContinueTimeout: 1 * time.Second,
+				}
+
+				// custom
+				transport.Protocols = protocols
+
+				// I'll trust the Go authors' choice of ciphers:
+				// https://cs.opensource.google/go/go/+/refs/tags/go1.24.3:src/crypto/tls/cipher_suites.go;l=56
+				// hasAES := cpu.X86.HasAES || cpu.ARM64.HasAES || cpu.ARM.HasAES || cpu.S390X.HasAES || cpu.RISCV64.HasZvkn
+				transport.TLSClientConfig = &tls.Config{}
+				if backend.ConnectInsecure {
+					transport.TLSClientConfig.InsecureSkipVerify = true
+				}
+				proxy.Transport = transport
+
+				server := &http.Server{
+					Handler: proxy,
+					BaseContext: func(_ net.Listener) context.Context {
+						return lc.Context
+					},
+					ConnContext: nil,
+					Protocols:   protocols,
+				}
+				go func() {
+					_ = server.Serve(backend.netProxy)
+				}()
 			}
 		}
 	}
@@ -377,10 +448,6 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 }
 
 func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
-	defer func() {
-		_ = conn.Close()
-	}()
-
 	var snialpn SNIALPN
 	var beConn net.Conn
 	var backend *Backend
@@ -436,15 +503,16 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					cfg.CurrentBackend.Add(inc)
 				}
 				var err error
-				// ctx, cancel := context.WithCancel(lc.Context)
-				beConn, err = getBackendConn(lc.Context, b.Host)
-				if err != nil {
-					// TODO mark as inactive and try next
-					return nil, fmt.Errorf("could not connect to backend %q", backend.Host)
-				}
-				if beConn != nil {
-					backend = b
-					break
+				if b.netProxy != nil {
+					beConn, err = getBackendConn(lc.Context, b.Host)
+					if err != nil {
+						// TODO mark as inactive and try next
+						return nil, fmt.Errorf("could not connect to backend %q", backend.Host)
+					}
+					if beConn != nil {
+						backend = b
+						break
+					}
 				}
 			}
 
@@ -496,7 +564,13 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	}
 
 	cConn := NewTLSConn(tlsConn)
-	_, _, retErr = CopyConn(cConn, beConn)
+	if backend.netProxy != nil {
+		// doesn't block
+		retErr = backend.netProxy.Offer(cConn)
+	} else {
+		_, _, retErr = CopyConn(cConn, beConn)
+		_ = conn.Close()
+	}
 	return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), retErr
 }
 
