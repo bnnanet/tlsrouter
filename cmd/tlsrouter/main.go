@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
+	"github.com/bnnanet/tlsrouter/netproxy"
 
 	"github.com/joho/godotenv"
 )
@@ -52,7 +56,11 @@ func printVersion() {
 }
 
 func main() {
-	godotenv.Load(".env")
+	if err := godotenv.Load(".env"); err != nil {
+		if err != os.ErrNotExist {
+			log.Printf("could not read .env: %s", err)
+		}
+	}
 	mainFlags := flag.NewFlagSet("", flag.ContinueOnError)
 
 	var showVersion bool
@@ -128,27 +136,58 @@ func main() {
 		return
 	}
 
+	var wg sync.WaitGroup
+	addr := fmt.Sprintf("%s:%d", bind, port)
+
 	cfg, err := ReadConfig(cfgPath)
 	if err != nil {
 		log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
 	}
+	lc := tlsrouter.NewListenConfig(cfg)
+	_ = Start(&wg, lc, addr)
 
-	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(cfg)
-	_, _ = tlsrouter.NormalizeConfig(cfg)
+	// Signal handling (must be have a buffer of at least 1)
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM)
 
-	// Use the bind address and port
-	addr := fmt.Sprintf("%s:%d", bind, port)
-	log.Printf("Listening on %s...", addr)
-	for _, site := range cfg.TLSMatches {
-		snialpns := strings.Join(site.Domains, ",") + "; " + strings.Join(site.ALPNs, ",")
-		fmt.Printf("   %s\n", snialpns)
-		for _, b := range site.Backends {
-			fmt.Printf("      %s:%d\n", b.Address, b.Port)
+	for {
+		sig := <-sigChan
+		switch sig {
+		case syscall.SIGUSR1:
+			log.Println("Received SIGUSR1, reloading config")
+
+			cfg, err := ReadConfig(cfgPath)
+			if err != nil {
+				log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
+			}
+			lc2 := tlsrouter.NewListenConfig(cfg)
+			_ = Start(&wg, lc2, addr)
+
+			// Gracefully shutdown old server
+			go lc.Shutdown()
+
+			// Update server reference
+			lc = lc2
+		case syscall.SIGTERM:
+			log.Println("Received SIGTERM, shutting down")
+			lc.Shutdown()
+		default:
+			log.Printf("Received unhandled signal %s", sig)
 		}
 	}
+}
 
-	lnCfg := tlsrouter.NewListenConfig(cfg)
-	log.Fatalf("Server Error:\n%#v\n", lnCfg.ListenAndProxy(addr))
+func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		log.Printf("\nListening on %s...", addr)
+		if err := lc.ListenAndProxy(addr); err != nil && err != netproxy.ErrListenerClosed {
+			log.Printf("Server error: %v", err)
+		}
+	}()
+	return nil
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
@@ -174,6 +213,17 @@ func ReadConfig(filePath string) (cfg tlsrouter.Config, err error) {
 
 	if err := tlsrouter.LintConfig(cfg, alpns); nil != err {
 		return cfg, err
+	}
+
+	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(cfg)
+	_, _ = tlsrouter.NormalizeConfig(cfg)
+
+	for _, site := range cfg.TLSMatches {
+		snialpns := strings.Join(site.Domains, ",") + "; " + strings.Join(site.ALPNs, ",")
+		fmt.Printf("   %s\n", snialpns)
+		for _, b := range site.Backends {
+			fmt.Printf("      %s:%d\n", b.Address, b.Port)
+		}
 	}
 
 	return cfg, nil
