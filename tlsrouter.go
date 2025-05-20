@@ -197,9 +197,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 	// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
 	// }
 
-	// dirtySNIALPNs := []SNIALPN{}
 	for snialpn, m := range snialpnMatchers {
-		// dirtyBackends := []*Backend{}
 		for _, backend := range m.Backends {
 			if !backend.TerminateTLS {
 				continue
@@ -248,6 +246,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 						r.SetURL(target)
 						r.Out.Host = r.In.Host // preserve Host header
 						r.SetXForwarded()
+						r.Out.Header["X-Forwarded-For"] = []string{"https"} // preserve https
 					},
 				}
 
