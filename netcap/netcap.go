@@ -1,4 +1,4 @@
-package netproxy
+package netcap
 
 import (
 	"context"
@@ -11,13 +11,17 @@ import (
 // ErrListenerClosed is returned when operations are performed on a closed Listener.
 var ErrListenerClosed = errors.New("netproxy: listener closed")
 
-// ListenConfig defines a faux-listener for parity with the net package
-type ListenConfig struct{}
+type TunnelListener interface {
+	Accept() (net.Conn, error)
+	Addr() net.Addr
+	Close() error
+	Inject(net.Conn) error
+}
 
-// Listen returns a Listener that can accept externally offered connections.
-func (lc *ListenConfig) Listen(ctx context.Context) (*Listener, error) {
+// Listen returns a TunnelListener that can accept injected / side-loaded connections
+func Listen(ctx context.Context) (TunnelListener, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	ln := &Listener{
+	ln := &dummyListener{
 		conns:     make(chan net.Conn),
 		ctx:       ctx,
 		ctxCancel: cancel,
@@ -25,16 +29,21 @@ func (lc *ListenConfig) Listen(ctx context.Context) (*Listener, error) {
 	return ln, nil
 }
 
-// Listener implements net.Listener, accepting connections fed in via Offer.
-type Listener struct {
+func NewListener(ctx context.Context) TunnelListener {
+	ln, _ := Listen(ctx)
+	return ln
+}
+
+// dummyListener implements net.Listener, accepting connections fed in via Inject.
+type dummyListener struct {
 	conns     chan net.Conn
 	ctx       context.Context
 	ctxCancel func()
 	closed    atomic.Bool
 }
 
-// Offer receives a connection and blocks until it is Accept()ed
-func (ln *Listener) Offer(conn net.Conn) error {
+// Inject receives a connection and blocks until it is Accept()ed
+func (ln *dummyListener) Inject(conn net.Conn) error {
 	if ln.closed.Load() {
 		return ErrListenerClosed
 	}
@@ -48,7 +57,7 @@ func (ln *Listener) Offer(conn net.Conn) error {
 }
 
 // Accept will block and wait for a new net.Conn
-func (ln *Listener) Accept() (net.Conn, error) {
+func (ln *dummyListener) Accept() (net.Conn, error) {
 	select {
 	case <-ln.ctx.Done():
 		return nil, ErrListenerClosed
@@ -61,7 +70,7 @@ func (ln *Listener) Accept() (net.Conn, error) {
 }
 
 // Close will close the conns channel
-func (ln *Listener) Close() error {
+func (ln *dummyListener) Close() error {
 	prevClosed := ln.closed.Swap(true)
 	if !prevClosed {
 		close(ln.conns)
@@ -70,7 +79,7 @@ func (ln *Listener) Close() error {
 }
 
 // Addr returns a dummy address to satisfy the net.Listener interface.
-func (ln *Listener) Addr() net.Addr {
+func (ln *dummyListener) Addr() net.Addr {
 	return dummyLocalAddr{}
 }
 

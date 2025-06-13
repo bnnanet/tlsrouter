@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnnanet/tlsrouter/netproxy"
+	"github.com/bnnanet/tlsrouter/netcap"
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
@@ -28,7 +28,6 @@ import (
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
-var proxyCfg = netproxy.ListenConfig{}
 
 type ErrorNoTLSConfig string
 
@@ -39,10 +38,10 @@ func (e ErrorNoTLSConfig) Error() string {
 // Config holds the TLS routing configuration and hostname resolutions.
 type Config struct {
 	ACMEDirectoryEndpoint string            `json:"-"`
+	AdminMatch            TLSMatch          `json:"admin"`
 	TLSMatches            []*TLSMatch       `json:"tls_matches"`
 	ACMEConfigs           []*ACMEConfig     `json:"acme,omitempty"`
-	HostnameOverrides     map[string]string `json:"hostname_overrides"`
-	certmagicStorage      certmagic.Storage `json:"-"` // TODO
+	certmagicStorage      certmagic.Storage `json:"-"`
 }
 
 // TLSMatch defines a rule for matching domains and ALPNs to backends.
@@ -70,16 +69,16 @@ type ACMEConfig struct {
 // Backend defines a proxy destination.
 type Backend struct {
 	// Active          *atomic.Bool `json:"-"`
+	Tunnel          netcap.TunnelListener
 	Host            string   `json:"-"`
 	Address         string   `json:"address"`
 	Port            uint16   `json:"port"`
 	ALPNs           []string `json:"-"`
-	netProxy        *netproxy.Listener
-	PROXYProto      int  `json:"proxy_protocol,omitempty"`
-	TerminateTLS    bool `json:"terminate_tls"`
-	ForceHTTP       bool `json:"force_http,omitempty"`
-	ConnectTLS      bool `json:"connect_tls"`
-	ConnectInsecure bool `json:"connect_insecure"`
+	PROXYProto      int      `json:"proxy_protocol,omitempty"`
+	TerminateTLS    bool     `json:"terminate_tls"`
+	ForceHTTP       bool     `json:"force_http,omitempty"`
+	ConnectTLS      bool     `json:"connect_tls"`
+	ConnectInsecure bool     `json:"connect_insecure"`
 	// ConnectSNI         string   `json:"connect_sni,omitempty"`
 	// ConnectALPNs       string   `json:"connect_alpn,omitempty"`
 	// ConnectCertRootPEMs [][]byte `json:"connect_cert_root_pems,omitempty"`
@@ -113,14 +112,16 @@ func (s SNIALPN) SNI() string {
 
 type ListenConfig struct {
 	config                  Config
+	adminTunnel             netcap.TunnelListener
+	Conns                   sync.Map
 	alpnsByDomain           map[string][]string
 	configBySNIALPN         map[SNIALPN]*TLSMatch
 	Context                 context.Context
 	ACMEDirectoryEndpoint   string
 	DisableTLSALPNChallenge bool
 	issuerConfMap           map[string]*ACMEConfig
-	certmagicTLSOnly        *certmagic.Config
-	certmagicConfMap        map[string]*certmagic.Config
+	certmagicTLSALPNOnly    *certmagic.Config
+	certmagicConfs          map[string]*certmagic.Config
 	certmagicCache          *certmagic.Cache
 	certmagicStorage        certmagic.Storage
 	done                    chan struct{}
@@ -133,20 +134,20 @@ func (lc *ListenConfig) Shutdown() {
 	lc.done <- struct{}{}
 }
 
-func NewListenConfig(cfg Config) *ListenConfig {
-	domainMatchers, snialpnMatchers := NormalizeConfig(cfg)
+func NewListenConfig(conf Config) *ListenConfig {
+	domainMatchers, snialpnMatchers := NormalizeConfig(conf)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	issuerConfMap := make(map[string]*ACMEConfig)
-	certmagicConfMap := make(map[string]*certmagic.Config)
-	certmagicStorage := cfg.certmagicStorage
+	certmagicConfs := make(map[string]*certmagic.Config)
+	certmagicStorage := conf.certmagicStorage
 	if certmagicStorage == nil {
 		certmagicStorage = &certmagic.FileStorage{Path: certmagicDataDir()}
 	}
 	certmagicCache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
-			magic, exists := certmagicConfMap[cert.Names[0]] // len(Names) > 0 is guaranteed
+			magic, exists := certmagicConfs[cert.Names[0]] // len(Names) > 0 is guaranteed
 			if !exists {
 				return nil, fmt.Errorf("impossible error: pre-configured domain %q is no longer configured", strings.Join(cert.Names, ", "))
 			}
@@ -155,14 +156,16 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		Logger: certmagic.Default.Logger,
 	})
 
-	directoryEndpoint := cfg.ACMEDirectoryEndpoint
+	directoryEndpoint := conf.ACMEDirectoryEndpoint
 	if len(directoryEndpoint) == 0 {
 		// TODO staging vs prod
 		directoryEndpoint = certmagic.LetsEncryptStagingCA
 	}
 
 	lc := &ListenConfig{
-		config:                  cfg,
+		config:                  conf,
+		adminTunnel:             netcap.NewListener(ctx),
+		Conns:                   sync.Map{},
 		alpnsByDomain:           domainMatchers,
 		configBySNIALPN:         snialpnMatchers,
 		Context:                 ctx,
@@ -170,8 +173,8 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		ACMEDirectoryEndpoint:   directoryEndpoint,
 		issuerConfMap:           issuerConfMap,
 		DisableTLSALPNChallenge: false,
-		certmagicTLSOnly:        nil,
-		certmagicConfMap:        certmagicConfMap,
+		certmagicTLSALPNOnly:    nil,
+		certmagicConfs:          certmagicConfs,
 		certmagicStorage:        certmagicStorage,
 		certmagicCache:          certmagicCache,
 		done:                    make(chan struct{}),
@@ -179,10 +182,11 @@ func NewListenConfig(cfg Config) *ListenConfig {
 			Control: reusePort,
 		},
 	}
-	lc.certmagicTLSOnly = lc.newCertmagicTLSOnly()
+	lc.certmagicTLSALPNOnly = lc.newCertmagicTLSALPNOnly()
 
 	// build up ACME configs
-	for _, acmeConf := range cfg.ACMEConfigs {
+	// (works for internal config too)
+	for _, acmeConf := range conf.ACMEConfigs {
 		switch acmeConf.DNS01Provider.API {
 		case "":
 			continue
@@ -203,6 +207,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 	// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
 	// }
 
+	// setup and remap matchers
 	for snialpn, m := range snialpnMatchers {
 		for _, backend := range m.Backends {
 			if !backend.TerminateTLS {
@@ -214,17 +219,17 @@ func NewListenConfig(cfg Config) *ListenConfig {
 			if !exists {
 				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (TLS-ALPN)\n", snialpn)
 				// note: certmagic doesn't support multi-SAN
-				if err := lc.certmagicTLSOnly.ManageSync(lc.Context, []string{domain}); err != nil {
+				if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 				}
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
 
-			if _, exists := lc.certmagicConfMap[domain]; !exists {
+			if _, exists := lc.certmagicConfs[domain]; !exists {
 				magic := lc.newCertmagic(acmeConf.DNSProvider)
 				for _, d := range acmeConf.Domains {
-					lc.certmagicConfMap[d] = magic
+					lc.certmagicConfs[d] = magic
 				}
 				// note: certmagic doesn't support multi-SAN
 				if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
@@ -237,12 +242,10 @@ func NewListenConfig(cfg Config) *ListenConfig {
 				continue
 			}
 
+			// Setting up single Proxy instance for all connections
 			alpn := snialpn.ALPN()
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
-				var err error
-				if backend.netProxy, err = proxyCfg.Listen(lc.Context); err != nil {
-					panic(fmt.Errorf("listener should not be closed when starting: %w", err))
-				}
+				backend.Tunnel = netcap.NewListener(lc.Context)
 
 				target := &url.URL{
 					Scheme: "http",
@@ -302,7 +305,8 @@ func NewListenConfig(cfg Config) *ListenConfig {
 					Protocols:   protocols,
 				}
 				go func() {
-					_ = server.Serve(backend.netProxy)
+					// TODO track state to be able to close
+					_ = server.Serve(backend.Tunnel)
 				}()
 			}
 		}
@@ -311,7 +315,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 	return lc
 }
 
-func (lc *ListenConfig) newCertmagicTLSOnly() *certmagic.Config {
+func (lc *ListenConfig) newCertmagicTLSALPNOnly() *certmagic.Config {
 
 	magic := certmagic.New(lc.certmagicCache, certmagic.Config{
 		RenewalWindowRatio: 0.3,
@@ -422,6 +426,23 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
+	go func() {
+		protocols := &http.Protocols{}
+		protocols.SetHTTP1(true)
+		protocols.SetHTTP2(true)
+		protocols.SetUnencryptedHTTP2(true)
+
+		server := &http.Server{
+			Handler: nil, // TODO THIS IS NEXT AJ!!!
+			BaseContext: func(_ net.Listener) context.Context {
+				return lc.Context
+			},
+			ConnContext: nil,
+			Protocols:   protocols,
+		}
+		_ = server.Serve(lc.adminTunnel)
+	}()
+
 	netLn, err := lc.netConf.Listen(lc.Context, "tcp", addr)
 	if err != nil {
 		return err
@@ -454,7 +475,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 			lc.done <- struct{}{}
 		case <-lc.done:
 			fmt.Fprintf(os.Stderr, "\n[[[[debug: stop server]]]]\n\n")
-			netLn.Close()
+			_ = netLn.Close()
 			return nil
 		}
 	}
@@ -467,7 +488,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	hc := newHelloConn(conn)
-	// tlsConn.NetConn()
+	// tlsConn.Conn()
 	tlsConn := tls.Server(hc, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			fmt.Fprintf(os.Stderr, "ServerName (SNI): %s\n", hello.ServerName)
@@ -487,36 +508,50 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 			// happy path, e.g. "example.com:h2"
 			snialpn = NewSNIALPN(domain, alpns[0])
-			cfg, exists := lc.configBySNIALPN[snialpn]
+			mcfg, exists := lc.configBySNIALPN[snialpn]
 			if !exists {
 				if len(alpns) > 1 {
 					// still happy path, e.g. "example.com:http/1.1"
 					snialpn = NewSNIALPN(domain, alpns[1])
-					cfg, exists = lc.configBySNIALPN[snialpn]
+					mcfg, exists = lc.configBySNIALPN[snialpn]
 				}
 				// unhappy path
 				if !exists {
 					var err error
-					snialpn, cfg, err = lc.slowMatch(domain, alpns)
+					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
+						if slices.Contains(lc.config.AdminMatch.Domains, domain) {
+							// TLS will be terminated
+							backend = &Backend{
+								// TODO AJ RIGHT HERE !!!
+								TerminateTLS: true,
+								Tunnel:       lc.adminTunnel,
+							}
+							_ = hc.Passthru()
+							return &tls.Config{
+								// Certificates: []tls.Certificate{*tlsCert},
+								GetCertificate: lc.certmagicConfs[domain].GetCertificate,
+								NextProtos:     []string{"h2", "http/1.1"}, // TODO h3
+							}, nil
+						}
 						return nil, err
 					}
 				}
 			}
 
-			for i, b := range cfg.Backends {
-				fmt.Printf("\n\nDEBUG cfg.Backend[%d]: %#v\n", i, b)
+			for i, b := range mcfg.Backends {
+				fmt.Printf("\n\nDEBUG mcfg.Backend[%d]: %#v\n", i, b)
 			}
 
 			var inc uint32 = 1
-			n := uint32(len(cfg.Backends)) - inc
+			n := uint32(len(mcfg.Backends)) - inc
 			for {
 				// simple round robin
-				b := cfg.Backends[cfg.CurrentBackend.Load()]
-				if !cfg.CurrentBackend.CompareAndSwap(n, 0) {
-					cfg.CurrentBackend.Add(inc)
+				b := mcfg.Backends[mcfg.CurrentBackend.Load()]
+				if !mcfg.CurrentBackend.CompareAndSwap(n, 0) {
+					mcfg.CurrentBackend.Add(inc)
 				}
-				if b.netProxy == nil && b.PROXYProto == 0 {
+				if b.Tunnel == nil && b.PROXYProto == 0 {
 					backend = b
 					break
 				}
@@ -533,24 +568,20 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			if !backend.TerminateTLS {
+				// We DO NOT enable passthru unless TLS will be terminated
+				// (tlsConn.Handshake() writes an error code on error here)
 				fmt.Println("DEBUG: No terminate TLS...")
 				return nil, ErrDoNotTerminate
-			}
-
-			fmt.Println("DEBUG: TERMINATE THE TLS!!")
-			_ = hc.Passthru()
-
-			magic, exists := lc.certmagicConfMap[domain]
-			if !exists {
-				panic(fmt.Errorf("impossible error: missing certmagic config configured domain"))
+			} else {
+				fmt.Println("DEBUG: TERMINATE THE TLS!!")
 			}
 
 			// TODO check snialpn support wildcards via config
-			// TODO get the cert directly
 			// TODO preconfigure as map on load
+			_ = hc.Passthru()
 			return &tls.Config{
 				// Certificates: []tls.Certificate{*tlsCert},
-				GetCertificate: magic.GetCertificate,
+				GetCertificate: lc.certmagicConfs[domain].GetCertificate,
 				NextProtos:     []string{snialpn.ALPN()},
 			}, nil
 		},
@@ -571,7 +602,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
 				}
 			}
-			return hc.copyConn(beConn)
+			// handles connection until it ends
+			lc.StoreAcceptedConn(hc)
+			return hc.copyConn(beConn) // enables passthru mode
 		}
 
 		var errNoCfg ErrorNoTLSConfig
@@ -587,7 +620,6 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	}
 
 	fmt.Println("do the next thing...")
-	_ = hc.Passthru() // Why call this here too?
 	if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
 		fmt.Println("PROXY PROTO...")
 		header := &proxyproto.Header{
@@ -604,17 +636,27 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 	fmt.Println("PLAIN CONN...")
 	cConn := NewTLSConn(tlsConn)
-	if backend.netProxy != nil {
-		fmt.Println("backend.netProxy.Offer")
-		// doesn't block
-		retErr = backend.netProxy.Offer(cConn)
+	hc.TLSConn = cConn
+	lc.StoreAcceptedConn(hc)
+	if backend.Tunnel != nil {
+		fmt.Println("backend.Tunnel.Inject")
+		// doesn't block TODO how to know its done?
+		retErr = backend.Tunnel.Inject(cConn)
 	} else {
 		fmt.Println("CopyConn(cConn, beConn)")
-		_, _, retErr = CopyConn(cConn, beConn)
+		_, _, retErr = CopyConn(cConn, beConn) // handles connection until it ends
 		_ = conn.Close()
 	}
 	fmt.Println("done")
 	return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), retErr
+}
+
+func (lc *ListenConfig) StoreAcceptedConn(hc *tlsHelloConn) {
+	now := time.Now()
+	ipAndPort := hc.RemoteAddr().String()
+	tcpOrUDP := hc.RemoteAddr().Network()
+	addr := fmt.Sprintf("%s:%s:%d", ipAndPort, tcpOrUDP, now.UnixMilli())
+	lc.Conns.Store(addr, hc)
 }
 
 // CopyConn is a bi-directional copy, calling io.Copy for both connections
@@ -814,6 +856,7 @@ func newHelloConn(nc net.Conn) *tlsHelloConn {
 
 type tlsHelloConn struct {
 	net.Conn
+	TLSConn      *TLSConn
 	passthru     bool
 	buffers      [][]byte
 	Connected    time.Time
@@ -888,11 +931,11 @@ func (tc *TLSConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
+func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 	domainALPNMatchers := map[string][]string{}
 	snialpnMatchers := map[SNIALPN]*TLSMatch{}
 
-	for _, m := range cfg.TLSMatches {
+	for _, m := range conf.TLSMatches {
 		if len(m.Backends) == 0 {
 			fmt.Println("debug: warn: empty backends")
 			continue
@@ -936,19 +979,19 @@ func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 	return domainALPNMatchers, snialpnMatchers
 }
 
-func LintConfig(cfg Config, allowedAlpns []string) error {
-	if len(cfg.TLSMatches) == 0 {
+func LintConfig(conf Config, allowedAlpns []string) error {
+	if len(conf.TLSMatches) == 0 {
 		return fmt.Errorf("error: 'tls_matches' is empty")
 	}
 
-	for _, match := range cfg.TLSMatches {
+	for _, match := range conf.TLSMatches {
 		snialpns := strings.Join(match.Domains, ",") + "; " + strings.Join(match.ALPNs, ",")
 
 		for _, domain := range match.Domains {
 			d := strings.ToLower(domain)
 
 			if domain != d {
-				return fmt.Errorf("lint: domain is not lowercase: %q\n", domain)
+				return fmt.Errorf("lint: domain is not lowercase: %q", domain)
 			}
 
 			if strings.HasPrefix(domain, "*") {
