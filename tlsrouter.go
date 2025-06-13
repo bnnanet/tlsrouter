@@ -3,6 +3,7 @@ package tlsrouter
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +39,7 @@ func (e ErrorNoTLSConfig) Error() string {
 
 // Config holds the TLS routing configuration and hostname resolutions.
 type Config struct {
+	Handler               *http.ServeMux    `json:"-"`
 	ACMEDirectoryEndpoint string            `json:"-"`
 	AdminMatch            TLSMatch          `json:"admin"`
 	TLSMatches            []*TLSMatch       `json:"tls_matches"`
@@ -201,11 +204,30 @@ func NewListenConfig(conf Config) *ListenConfig {
 		for _, domain := range acmeConf.Domains {
 			issuerConfMap[domain] = acmeConf
 		}
+
+		// if !acmeConf.Agreed {
+		// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
+		// }
 	}
 
-	// if !acmeConf.Agreed {
-	// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
-	// }
+	// setup admin acme
+	for _, domain := range conf.AdminMatch.Domains {
+		acmeConf, exists := issuerConfMap[domain]
+		if !exists {
+			fmt.Fprintf(os.Stderr, "[warn] no ACME config for (internal) admin domain %s\n", domain)
+			continue
+		}
+		if _, exists := lc.certmagicConfs[domain]; !exists {
+			magic := lc.newCertmagic(acmeConf.DNSProvider)
+			for _, d := range acmeConf.Domains {
+				lc.certmagicConfs[d] = magic
+			}
+			// note: certmagic doesn't support multi-SAN
+			if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
+				fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+			}
+		}
+	}
 
 	// setup and remap matchers
 	for snialpn, m := range snialpnMatchers {
@@ -395,7 +417,7 @@ func (lc *ListenConfig) newCertmagic(dnsProvider certmagic.DNSProvider) *certmag
 		// Email:                   os.Getenv("DUCKDNS_EMAIL"), // TODO XXX TODO TODO
 		Agreed:                  true,
 		DisableHTTPChallenge:    true,
-		DisableTLSALPNChallenge: lc.DisableTLSALPNChallenge,
+		DisableTLSALPNChallenge: true, // lc.DisableTLSALPNChallenge,
 		DNS01Solver:             dns01Solver,
 		// plus any other customizations you need
 	}
@@ -423,8 +445,66 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 	})
 }
 
+type PConn struct {
+	Address      string    `json:"address"`
+	ServerName   string    `json:"servername"`
+	ALPN         string    `json:"alpn"`
+	Read         Int52     `json:"read"`
+	Written      Int52     `json:"written"`
+	Since        time.Time `json:"since"`
+	PlainRead    Int52     `json:"plain_read"`
+	PlainWritten Int52     `json:"plain_written"`
+}
+
+// Int52 is a newtype for int that marshals/unmarshals as int64 in JSON.
+type Int52 int64
+
+// MarshalJSON implements json.Marshaler.
+func (i Int52) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatInt(int64(i), 10)), nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (i *Int52) UnmarshalJSON(data []byte) error {
+	val, err := strconv.ParseInt(string(data), 10, 64)
+	if err != nil {
+		return err
+	}
+	*i = Int52(val)
+	return nil
+}
+
+func (lc *ListenConfig) listConnections(w http.ResponseWriter, r *http.Request) {
+	list := []PConn{}
+
+	lc.Conns.Range(func(_, v any) bool {
+		hc := v.(*tlsHelloConn)
+		pconn := PConn{
+			Address:    hc.Conn.RemoteAddr().String(),
+			ServerName: hc.SNIALPN.SNI(),
+			ALPN:       hc.SNIALPN.ALPN(),
+			Read:       Int52(hc.BytesRead.Load()),
+			Written:    Int52(hc.BytesWritten.Load()),
+			Since:      hc.Connected,
+		}
+		if hc.TLSConn != nil {
+			tlsState := hc.TLSConn.ConnectionState()
+			pconn.ALPN = tlsState.NegotiatedProtocol
+			pconn.ServerName = tlsState.ServerName
+		}
+		list = append(list, pconn)
+		return true
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(list)
+}
+
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
+
+	lc.config.Handler.HandleFunc("GET /api/connections", lc.listConnections)
 
 	go func() {
 		protocols := &http.Protocols{}
@@ -433,7 +513,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 		protocols.SetUnencryptedHTTP2(true)
 
 		server := &http.Server{
-			Handler: nil, // TODO THIS IS NEXT AJ!!!
+			Handler: lc.config.Handler,
 			BaseContext: func(_ net.Listener) context.Context {
 				return lc.Context
 			},
@@ -520,6 +600,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					var err error
 					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
+						fmt.Println("DEBUG Admin", lc.config.AdminMatch.Domains, domain)
 						if slices.Contains(lc.config.AdminMatch.Domains, domain) {
 							// TLS will be terminated
 							backend = &Backend{
@@ -528,6 +609,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 								Tunnel:       lc.adminTunnel,
 							}
 							_ = hc.Passthru()
+							fmt.Println("DEBUG 2", domain, lc.certmagicConfs[domain])
 							return &tls.Config{
 								// Certificates: []tls.Certificate{*tlsCert},
 								GetCertificate: lc.certmagicConfs[domain].GetCertificate,
@@ -578,6 +660,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 			// TODO check snialpn support wildcards via config
 			// TODO preconfigure as map on load
+			fmt.Println("DEBUG 1", domain, lc.certmagicConfs[domain])
 			_ = hc.Passthru()
 			return &tls.Config{
 				// Certificates: []tls.Certificate{*tlsCert},
@@ -603,7 +686,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				}
 			}
 			// handles connection until it ends
-			lc.StoreAcceptedConn(hc)
+			lc.StoreAcceptedConn(hc, snialpn)
 			return hc.copyConn(beConn) // enables passthru mode
 		}
 
@@ -637,7 +720,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	fmt.Println("PLAIN CONN...")
 	cConn := NewTLSConn(tlsConn)
 	hc.TLSConn = cConn
-	lc.StoreAcceptedConn(hc)
+	lc.StoreAcceptedConn(hc, snialpn)
 	if backend.Tunnel != nil {
 		fmt.Println("backend.Tunnel.Inject")
 		// doesn't block TODO how to know its done?
@@ -651,7 +734,8 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), retErr
 }
 
-func (lc *ListenConfig) StoreAcceptedConn(hc *tlsHelloConn) {
+func (lc *ListenConfig) StoreAcceptedConn(hc *tlsHelloConn, snialpn SNIALPN) {
+	hc.SNIALPN = snialpn
 	now := time.Now()
 	ipAndPort := hc.RemoteAddr().String()
 	tcpOrUDP := hc.RemoteAddr().Network()
@@ -858,6 +942,7 @@ type tlsHelloConn struct {
 	net.Conn
 	TLSConn      *TLSConn
 	passthru     bool
+	SNIALPN      SNIALPN
 	buffers      [][]byte
 	Connected    time.Time
 	BytesRead    *atomic.Uint64

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -12,10 +13,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
-	"github.com/bnnanet/tlsrouter/netproxy"
+	"github.com/bnnanet/tlsrouter/netcap"
 
 	"github.com/joho/godotenv"
 )
@@ -29,9 +31,10 @@ const (
 
 // set by GoReleaser via ldflags
 var (
-	version = ""
-	commit  = ""
-	date    = ""
+	version     = ""
+	commit      = ""
+	date        = ""
+	serverStart = time.Time{}
 )
 
 // workaround for `tinygo` ldflag replacement handling not allowing default values
@@ -143,12 +146,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
 	}
+
+	cfg.Handler = http.NewServeMux()
+	setupRouter(cfg.Handler)
 	lc := tlsrouter.NewListenConfig(cfg)
 	_ = Start(&wg, lc, addr)
 
 	// Signal handling (must be have a buffer of at least 1)
 	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
 
 	for {
 		sig := <-sigChan
@@ -160,6 +166,8 @@ func main() {
 			if err != nil {
 				log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
 			}
+			cfg.Handler = http.NewServeMux()
+			setupRouter(cfg.Handler)
 			lc2 := tlsrouter.NewListenConfig(cfg)
 			_ = Start(&wg, lc2, addr)
 
@@ -168,9 +176,16 @@ func main() {
 
 			// Update server reference
 			lc = lc2
-		case syscall.SIGTERM:
-			log.Println("Received SIGTERM, shutting down")
+		case syscall.SIGINT:
+			log.Println("Received SIGINT, shutting down (5s)")
 			lc.Shutdown()
+			time.Sleep(5 * time.Second)
+			os.Exit(1)
+		case syscall.SIGTERM:
+			log.Println("Received SIGTERM, shutting down (5s)")
+			lc.Shutdown()
+			time.Sleep(5 * time.Second)
+			os.Exit(1)
 		default:
 			log.Printf("Received unhandled signal %s", sig)
 		}
@@ -183,7 +198,7 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
 		defer wg.Done()
 
 		log.Printf("\nListening on %s...", addr)
-		if err := lc.ListenAndProxy(addr); err != nil && err != netproxy.ErrListenerClosed {
+		if err := lc.ListenAndProxy(addr); err != nil && err != netcap.ErrListenerClosed {
 			log.Printf("Server error: %v", err)
 		}
 	}()
@@ -227,4 +242,73 @@ func ReadConfig(filePath string) (cfg tlsrouter.Config, err error) {
 	}
 
 	return cfg, nil
+}
+
+func setupRouter(mux *http.ServeMux) {
+	handleStatus := createHandleStatus(time.Now())
+
+	mux.HandleFunc("GET /version", handleVersion)
+	mux.HandleFunc("GET /api/version", handleVersion)
+	mux.HandleFunc("GET /api/public/version", handleVersion)
+
+	mux.HandleFunc("GET /status", handleStatus)
+	mux.HandleFunc("GET /api/status", handleStatus)
+	mux.HandleFunc("GET /api/public/status", handleStatus)
+}
+
+func handleVersion(w http.ResponseWriter, r *http.Request) {
+	_, _ = fmt.Fprintf(
+		w,
+		"{\n   \"name\": %q,\n   \"version\": %q,\n   \"commit\": %q,\n   \"date\": %q\n}\n",
+		name, version, commit, date,
+	)
+}
+
+func createHandleStatus(apiStart time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		systemUptime := time.Since(serverStart)
+		apiUptime := time.Since(apiStart)
+		_, _ = fmt.Fprintf(
+			w,
+			"{\n   \"system_seconds\": %.2f,\n   \"system_uptime\": %q,"+
+				"\n   \"api_seconds\": %.2f,\n   \"api_uptime\": %q"+
+				"\n}\n",
+			systemUptime.Seconds(), formatDuration(systemUptime),
+			apiUptime.Seconds(), formatDuration(apiUptime),
+		)
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	days := int(d / (24 * time.Hour))
+	d -= time.Duration(days) * 24 * time.Hour
+	hours := int(d / time.Hour)
+	d -= time.Duration(hours) * time.Hour
+	minutes := int(d / time.Minute)
+	d -= time.Duration(minutes) * time.Minute
+	seconds := int(d / time.Second)
+
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	if seconds > 0 {
+		parts = append(parts, fmt.Sprintf("%ds", seconds))
+	}
+	if seconds == 0 || len(parts) == 0 {
+		d -= time.Duration(seconds) * time.Second
+		millis := int(d / time.Millisecond)
+		parts = append(parts, fmt.Sprintf("%dms", millis))
+	}
+
+	return strings.Join(parts, " ")
 }
