@@ -86,13 +86,13 @@ func main() {
 	bind := defaultBind
 	mainFlags.StringVar(&bind, "bind", defaultBind, "Address to bind to")
 
-	defaultCfgPath := "tlsrouter.json"
+	defaultConfPath := "tlsrouter.json"
 	// Check BIND environment variable, override default if set
-	if envCfgPath := os.Getenv("CONFIG_FILE"); envCfgPath != "" {
-		defaultCfgPath = envCfgPath
+	if envConfPath := os.Getenv("CONFIG_FILE"); envConfPath != "" {
+		defaultConfPath = envConfPath
 	}
-	cfgPath := defaultCfgPath
-	mainFlags.StringVar(&cfgPath, "config", defaultCfgPath, "Path to JSON config file")
+	confPath := defaultConfPath
+	mainFlags.StringVar(&confPath, "config", defaultConfPath, "Path to JSON config file")
 
 	mainFlags.Usage = func() {
 		printVersion()
@@ -139,11 +139,11 @@ func main() {
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", bind, port)
 
-	cfg, err := ReadConfig(cfgPath)
+	conf, err := ReadConfig(confPath)
 	if err != nil {
-		log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
+		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 	}
-	lc := tlsrouter.NewListenConfig(cfg)
+	lc := tlsrouter.NewListenConfig(conf)
 	_ = Start(&wg, lc, addr)
 
 	// Signal handling (must be have a buffer of at least 1)
@@ -156,11 +156,11 @@ func main() {
 		case syscall.SIGUSR1:
 			log.Println("Received SIGUSR1, reloading config")
 
-			cfg, err := ReadConfig(cfgPath)
+			conf, err := ReadConfig(confPath)
 			if err != nil {
-				log.Fatalf("Config Error: %q\n%s\n", cfgPath, err)
+				log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 			}
-			lc2 := tlsrouter.NewListenConfig(cfg)
+			lc2 := tlsrouter.NewListenConfig(conf)
 			_ = Start(&wg, lc2, addr)
 
 			// Gracefully shutdown old server
@@ -191,15 +191,15 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
-func ReadConfig(filePath string) (cfg tlsrouter.Config, err error) {
+func ReadConfig(filePath string) (conf tlsrouter.Config, err error) {
 	// Read the file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return cfg, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+		return conf, fmt.Errorf("failed to read config file %s: %w", filePath, err)
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("failed to parse config JSON: %w", err)
+	if err := json.Unmarshal(data, &conf); err != nil {
+		return conf, fmt.Errorf("failed to parse config JSON: %w", err)
 	}
 
 	customAlpns := []string{"ssh"}
@@ -211,14 +211,14 @@ func ReadConfig(filePath string) (cfg tlsrouter.Config, err error) {
 		}
 	}
 
-	if err := tlsrouter.LintConfig(cfg, alpns); nil != err {
-		return cfg, err
+	if err := tlsrouter.LintConfig(conf, alpns); nil != err {
+		return conf, err
 	}
 
-	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(cfg)
-	_, _ = tlsrouter.NormalizeConfig(cfg)
+	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(conf)
+	_, _ = tlsrouter.NormalizeConfig(conf)
 
-	for _, site := range cfg.TLSMatches {
+	for _, site := range conf.TLSMatches {
 		snialpns := strings.Join(site.Domains, ",") + "; " + strings.Join(site.ALPNs, ",")
 		fmt.Printf("   %s\n", snialpns)
 		for _, b := range site.Backends {
@@ -226,5 +226,5 @@ func ReadConfig(filePath string) (cfg tlsrouter.Config, err error) {
 		}
 	}
 
-	return cfg, nil
+	return conf, nil
 }
