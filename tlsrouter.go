@@ -133,14 +133,14 @@ func (lc *ListenConfig) Shutdown() {
 	lc.done <- struct{}{}
 }
 
-func NewListenConfig(cfg Config) *ListenConfig {
-	domainMatchers, snialpnMatchers := NormalizeConfig(cfg)
+func NewListenConfig(conf Config) *ListenConfig {
+	domainMatchers, snialpnMatchers := NormalizeConfig(conf)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	issuerConfMap := make(map[string]*ACMEConfig)
 	certmagicConfMap := make(map[string]*certmagic.Config)
-	certmagicStorage := cfg.certmagicStorage
+	certmagicStorage := conf.certmagicStorage
 	if certmagicStorage == nil {
 		certmagicStorage = &certmagic.FileStorage{Path: certmagicDataDir()}
 	}
@@ -155,14 +155,14 @@ func NewListenConfig(cfg Config) *ListenConfig {
 		Logger: certmagic.Default.Logger,
 	})
 
-	directoryEndpoint := cfg.ACMEDirectoryEndpoint
+	directoryEndpoint := conf.ACMEDirectoryEndpoint
 	if len(directoryEndpoint) == 0 {
 		// TODO staging vs prod
 		directoryEndpoint = certmagic.LetsEncryptStagingCA
 	}
 
 	lc := &ListenConfig{
-		config:                  cfg,
+		config:                  conf,
 		alpnsByDomain:           domainMatchers,
 		configBySNIALPN:         snialpnMatchers,
 		Context:                 ctx,
@@ -182,7 +182,7 @@ func NewListenConfig(cfg Config) *ListenConfig {
 	lc.certmagicTLSOnly = lc.newCertmagicTLSOnly()
 
 	// build up ACME configs
-	for _, acmeConf := range cfg.ACMEConfigs {
+	for _, acmeConf := range conf.ACMEConfigs {
 		switch acmeConf.DNS01Provider.API {
 		case "":
 			continue
@@ -487,34 +487,34 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 			// happy path, e.g. "example.com:h2"
 			snialpn = NewSNIALPN(domain, alpns[0])
-			cfg, exists := lc.configBySNIALPN[snialpn]
+			mcfg, exists := lc.configBySNIALPN[snialpn]
 			if !exists {
 				if len(alpns) > 1 {
 					// still happy path, e.g. "example.com:http/1.1"
 					snialpn = NewSNIALPN(domain, alpns[1])
-					cfg, exists = lc.configBySNIALPN[snialpn]
+					mcfg, exists = lc.configBySNIALPN[snialpn]
 				}
 				// unhappy path
 				if !exists {
 					var err error
-					snialpn, cfg, err = lc.slowMatch(domain, alpns)
+					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
 						return nil, err
 					}
 				}
 			}
 
-			for i, b := range cfg.Backends {
-				fmt.Printf("\n\nDEBUG cfg.Backend[%d]: %#v\n", i, b)
+			for i, b := range mcfg.Backends {
+				fmt.Printf("\n\nDEBUG mcfg.Backend[%d]: %#v\n", i, b)
 			}
 
 			var inc uint32 = 1
-			n := uint32(len(cfg.Backends)) - inc
+			n := uint32(len(mcfg.Backends)) - inc
 			for {
 				// simple round robin
-				b := cfg.Backends[cfg.CurrentBackend.Load()]
-				if !cfg.CurrentBackend.CompareAndSwap(n, 0) {
-					cfg.CurrentBackend.Add(inc)
+				b := mcfg.Backends[mcfg.CurrentBackend.Load()]
+				if !mcfg.CurrentBackend.CompareAndSwap(n, 0) {
+					mcfg.CurrentBackend.Add(inc)
 				}
 				if b.netProxy == nil && b.PROXYProto == 0 {
 					backend = b
@@ -574,8 +574,8 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			return hc.copyConn(beConn)
 		}
 
-		var errNoCfg ErrorNoTLSConfig
-		if errors.As(err, &errNoCfg) {
+		var errNoTLSConf ErrorNoTLSConfig
+		if errors.As(err, &errNoTLSConf) {
 			// TODO error log channel
 			log.Printf("no tls config: %s", err)
 			return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
@@ -888,11 +888,11 @@ func (tc *TLSConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
+func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 	domainALPNMatchers := map[string][]string{}
 	snialpnMatchers := map[SNIALPN]*TLSMatch{}
 
-	for _, m := range cfg.TLSMatches {
+	for _, m := range conf.TLSMatches {
 		if len(m.Backends) == 0 {
 			fmt.Println("debug: warn: empty backends")
 			continue
@@ -936,12 +936,12 @@ func NormalizeConfig(cfg Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 	return domainALPNMatchers, snialpnMatchers
 }
 
-func LintConfig(cfg Config, allowedAlpns []string) error {
-	if len(cfg.TLSMatches) == 0 {
+func LintConfig(conf Config, allowedAlpns []string) error {
+	if len(conf.TLSMatches) == 0 {
 		return fmt.Errorf("error: 'tls_matches' is empty")
 	}
 
-	for _, match := range cfg.TLSMatches {
+	for _, match := range conf.TLSMatches {
 		snialpns := strings.Join(match.Domains, ",") + "; " + strings.Join(match.ALPNs, ",")
 
 		for _, domain := range match.Domains {
