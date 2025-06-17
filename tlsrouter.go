@@ -454,7 +454,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 			lc.done <- struct{}{}
 		case <-lc.done:
 			fmt.Fprintf(os.Stderr, "\n[[[[debug: stop server]]]]\n\n")
-			netLn.Close()
+			_ = netLn.Close()
 			return nil
 		}
 	}
@@ -948,7 +948,7 @@ func LintConfig(cfg Config, allowedAlpns []string) error {
 			d := strings.ToLower(domain)
 
 			if domain != d {
-				return fmt.Errorf("lint: domain is not lowercase: %q\n", domain)
+				return fmt.Errorf("lint: domain is not lowercase: %q", domain)
 			}
 
 			if strings.HasPrefix(domain, "*") {
