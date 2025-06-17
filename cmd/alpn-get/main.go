@@ -45,7 +45,9 @@ func downloadCSV() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("downloading CSV: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download failed: status %d", resp.StatusCode)
 	}
