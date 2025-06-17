@@ -40,8 +40,8 @@ type Config struct {
 	ACMEDirectoryEndpoint string            `json:"-"`
 	TLSMatches            []*TLSMatch       `json:"tls_matches"`
 	ACMEConfigs           []*ACMEConfig     `json:"acme,omitempty"`
+	certmagicStorage      certmagic.Storage `json:"-"`
 	HostnameOverrides     map[string]string `json:"hostname_overrides"`
-	certmagicStorage      certmagic.Storage `json:"-"` // TODO
 }
 
 // TLSMatch defines a rule for matching domains and ALPNs to backends.
