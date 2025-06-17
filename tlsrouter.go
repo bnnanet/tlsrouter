@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnnanet/tlsrouter/netproxy"
+	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
@@ -28,7 +28,6 @@ import (
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
-var proxyCfg = netproxy.ListenConfig{}
 
 type ErrorNoTLSConfig string
 
@@ -70,16 +69,16 @@ type ACMEConfig struct {
 // Backend defines a proxy destination.
 type Backend struct {
 	// Active          *atomic.Bool `json:"-"`
-	Host            string   `json:"-"`
-	Address         string   `json:"address"`
-	Port            uint16   `json:"port"`
-	ALPNs           []string `json:"-"`
-	netProxy        *netproxy.Listener
-	PROXYProto      int  `json:"proxy_protocol,omitempty"`
-	TerminateTLS    bool `json:"terminate_tls"`
-	ForceHTTP       bool `json:"force_http,omitempty"`
-	ConnectTLS      bool `json:"connect_tls"`
-	ConnectInsecure bool `json:"connect_insecure"`
+	Host            string             `json:"-"`
+	Address         string             `json:"address"`
+	Port            uint16             `json:"port"`
+	ALPNs           []string           `json:"-"`
+	Tunnel          tun.InjectListener `json:"-"`
+	PROXYProto      int                `json:"proxy_protocol,omitempty"`
+	TerminateTLS    bool               `json:"terminate_tls"`
+	ForceHTTP       bool               `json:"force_http,omitempty"`
+	ConnectTLS      bool               `json:"connect_tls"`
+	ConnectInsecure bool               `json:"connect_insecure"`
 	// ConnectSNI         string   `json:"connect_sni,omitempty"`
 	// ConnectALPNs       string   `json:"connect_alpn,omitempty"`
 	// ConnectCertRootPEMs [][]byte `json:"connect_cert_root_pems,omitempty"`
@@ -239,10 +238,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 			alpn := snialpn.ALPN()
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
-				var err error
-				if backend.netProxy, err = proxyCfg.Listen(lc.Context); err != nil {
-					panic(fmt.Errorf("listener should not be closed when starting: %w", err))
-				}
+				backend.Tunnel = tun.NewListener(lc.Context)
 
 				target := &url.URL{
 					Scheme: "http",
@@ -293,7 +289,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 				}
 				proxy.Transport = transport
 
-				server := &http.Server{
+				proxyServer := &http.Server{
 					Handler: proxy,
 					BaseContext: func(_ net.Listener) context.Context {
 						return lc.Context
@@ -302,7 +298,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 					Protocols:   protocols,
 				}
 				go func() {
-					_ = server.Serve(backend.netProxy)
+					_ = proxyServer.Serve(backend.Tunnel)
 				}()
 			}
 		}
@@ -516,7 +512,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				if !mcfg.CurrentBackend.CompareAndSwap(n, 0) {
 					mcfg.CurrentBackend.Add(inc)
 				}
-				if b.netProxy == nil && b.PROXYProto == 0 {
+				if b.Tunnel == nil && b.PROXYProto == 0 {
 					backend = b
 					break
 				}
@@ -604,10 +600,10 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 	fmt.Println("PLAIN CONN...")
 	cConn := NewTLSConn(tlsConn)
-	if backend.netProxy != nil {
-		fmt.Println("backend.netProxy.Offer")
+	if backend.Tunnel != nil {
+		fmt.Println("backend.Tunnel.Inject")
 		// doesn't block
-		retErr = backend.netProxy.Offer(cConn)
+		retErr = backend.Tunnel.Inject(cConn)
 	} else {
 		fmt.Println("CopyConn(cConn, beConn)")
 		_, _, retErr = CopyConn(cConn, beConn)
