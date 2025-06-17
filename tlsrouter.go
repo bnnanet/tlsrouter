@@ -257,11 +257,6 @@ func NewListenConfig(conf Config) *ListenConfig {
 					},
 				}
 
-				protocols := &http.Protocols{}
-				protocols.SetHTTP1(true)
-				protocols.SetHTTP2(true)
-				protocols.SetUnencryptedHTTP2(true)
-
 				// default transport https://pkg.go.dev/net/http#DefaultTransport
 				dialer := &net.Dialer{
 					Timeout:   30 * time.Second,
@@ -278,6 +273,10 @@ func NewListenConfig(conf Config) *ListenConfig {
 				}
 
 				// custom
+				protocols := &http.Protocols{}
+				protocols.SetHTTP1(true)
+				protocols.SetHTTP2(true)
+				protocols.SetUnencryptedHTTP2(true)
 				transport.Protocols = protocols
 
 				// I'll trust the Go authors' choice of ciphers:
