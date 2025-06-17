@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -30,9 +31,10 @@ const (
 
 // set by GoReleaser via ldflags
 var (
-	version = ""
-	commit  = ""
-	date    = ""
+	version     = ""
+	commit      = ""
+	date        = ""
+	serverStart = time.Now()
 )
 
 // workaround for `tinygo` ldflag replacement handling not allowing default values
@@ -144,6 +146,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 	}
+	conf.Handler = http.NewServeMux()
+	setupRouter(conf.Handler)
 	lc := tlsrouter.NewListenConfig(conf)
 	_ = Start(&wg, lc, addr)
 
@@ -161,6 +165,8 @@ func main() {
 			if err != nil {
 				log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 			}
+			conf.Handler = http.NewServeMux()
+			setupRouter(conf.Handler)
 			lc2 := tlsrouter.NewListenConfig(conf)
 			_ = Start(&wg, lc2, addr)
 
@@ -235,4 +241,73 @@ func ReadConfig(filePath string) (conf tlsrouter.Config, err error) {
 	}
 
 	return conf, nil
+}
+
+func setupRouter(mux *http.ServeMux) {
+	handleStatus := createHandleStatus(time.Now())
+
+	mux.HandleFunc("GET /version", handleVersion)
+	mux.HandleFunc("GET /api/version", handleVersion)
+	mux.HandleFunc("GET /api/public/version", handleVersion)
+
+	mux.HandleFunc("GET /status", handleStatus)
+	mux.HandleFunc("GET /api/status", handleStatus)
+	mux.HandleFunc("GET /api/public/status", handleStatus)
+}
+
+func handleVersion(w http.ResponseWriter, r *http.Request) {
+	_, _ = fmt.Fprintf(
+		w,
+		"{\n   \"name\": %q,\n   \"version\": %q,\n   \"commit\": %q,\n   \"date\": %q\n}\n",
+		name, version, commit, date,
+	)
+}
+
+func createHandleStatus(apiStart time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		systemUptime := time.Since(serverStart)
+		apiUptime := time.Since(apiStart)
+		_, _ = fmt.Fprintf(
+			w,
+			"{\n   \"system_seconds\": %.2f,\n   \"system_uptime\": %q,"+
+				"\n   \"api_seconds\": %.2f,\n   \"api_uptime\": %q"+
+				"\n}\n",
+			systemUptime.Seconds(), formatDuration(systemUptime),
+			apiUptime.Seconds(), formatDuration(apiUptime),
+		)
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	days := int(d / (24 * time.Hour))
+	d -= time.Duration(days) * 24 * time.Hour
+	hours := int(d / time.Hour)
+	d -= time.Duration(hours) * time.Hour
+	minutes := int(d / time.Minute)
+	d -= time.Duration(minutes) * time.Minute
+	seconds := int(d / time.Second)
+
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	if seconds > 0 {
+		parts = append(parts, fmt.Sprintf("%ds", seconds))
+	}
+	if seconds == 0 || len(parts) == 0 {
+		d -= time.Duration(seconds) * time.Second
+		millis := int(d / time.Millisecond)
+		parts = append(parts, fmt.Sprintf("%dms", millis))
+	}
+
+	return strings.Join(parts, " ")
 }
