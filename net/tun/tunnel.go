@@ -1,4 +1,4 @@
-package netproxy
+package tun
 
 import (
 	"context"
@@ -11,11 +11,15 @@ import (
 // ErrListenerClosed is returned when operations are performed on a closed Listener.
 var ErrListenerClosed = errors.New("netproxy: listener closed")
 
-// ListenConfig defines a faux-listener for parity with the net package
-type ListenConfig struct{}
+type InjectListener interface {
+	Accept() (net.Conn, error)
+	Addr() net.Addr
+	Close() error
+	Inject(net.Conn) error
+}
 
-// Listen returns a Listener that can accept externally offered connections.
-func (lc *ListenConfig) Listen(ctx context.Context) (*Listener, error) {
+// Listen returns a faux Listener that can accept externally offered connections.
+func Listen(ctx context.Context) (*Listener, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	ln := &Listener{
 		conns:     make(chan net.Conn),
@@ -23,6 +27,11 @@ func (lc *ListenConfig) Listen(ctx context.Context) (*Listener, error) {
 		ctxCancel: cancel,
 	}
 	return ln, nil
+}
+
+func NewListener(ctx context.Context) InjectListener {
+	ln, _ := Listen(ctx)
+	return ln
 }
 
 // Listener implements net.Listener, accepting connections fed in via Offer.
@@ -33,8 +42,8 @@ type Listener struct {
 	closed    atomic.Bool
 }
 
-// Offer receives a connection and blocks until it is Accept()ed
-func (ln *Listener) Offer(conn net.Conn) error {
+// Inject receives a connection and blocks until it is Accept()ed
+func (ln *Listener) Inject(conn net.Conn) error {
 	if ln.closed.Load() {
 		return ErrListenerClosed
 	}
@@ -79,3 +88,7 @@ type dummyLocalAddr struct{}
 
 func (d dummyLocalAddr) Network() string { return "TODO" }
 func (d dummyLocalAddr) String() string  { return "TODO" }
+
+var (
+	_ InjectListener = (*Listener)(nil)
+)

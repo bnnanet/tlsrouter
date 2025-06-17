@@ -15,7 +15,7 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
-	"github.com/bnnanet/tlsrouter/netproxy"
+	"github.com/bnnanet/tlsrouter/net/tun"
 
 	"github.com/joho/godotenv"
 )
@@ -183,7 +183,7 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
 		defer wg.Done()
 
 		log.Printf("\nListening on %s...", addr)
-		if err := lc.ListenAndProxy(addr); err != nil && err != netproxy.ErrListenerClosed {
+		if err := lc.ListenAndProxy(addr); err != nil && err != tun.ErrListenerClosed {
 			log.Printf("Server error: %v", err)
 		}
 	}()
