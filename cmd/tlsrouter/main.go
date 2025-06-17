@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
@@ -148,7 +149,7 @@ func main() {
 
 	// Signal handling (must be have a buffer of at least 1)
 	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
 
 	for {
 		sig := <-sigChan
@@ -168,9 +169,16 @@ func main() {
 
 			// Update server reference
 			lc = lc2
-		case syscall.SIGTERM:
-			log.Println("Received SIGTERM, shutting down")
+		case syscall.SIGINT:
+			log.Println("Received SIGINT, shutting down (5s)")
 			lc.Shutdown()
+			time.Sleep(5 * time.Second)
+			os.Exit(1)
+		case syscall.SIGTERM:
+			log.Println("Received SIGTERM, shutting down (5s)")
+			lc.Shutdown()
+			time.Sleep(5 * time.Second)
+			os.Exit(1)
 		default:
 			log.Printf("Received unhandled signal %s", sig)
 		}
