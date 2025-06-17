@@ -111,20 +111,19 @@ func (s SNIALPN) SNI() string {
 // type Matchers map[string]TLSMatch
 
 type ListenConfig struct {
-	config                  Config
-	alpnsByDomain           map[string][]string
-	configBySNIALPN         map[SNIALPN]*TLSMatch
-	Context                 context.Context
-	ACMEDirectoryEndpoint   string
-	DisableTLSALPNChallenge bool
-	issuerConfMap           map[string]*ACMEConfig
-	certmagicTLSALPNOnly    *certmagic.Config
-	certmagicConfMap        map[string]*certmagic.Config
-	certmagicCache          *certmagic.Cache
-	certmagicStorage        certmagic.Storage
-	done                    chan struct{}
-	Close                   func()
-	netConf                 net.ListenConfig
+	config                Config
+	alpnsByDomain         map[string][]string
+	configBySNIALPN       map[SNIALPN]*TLSMatch
+	Context               context.Context
+	ACMEDirectoryEndpoint string
+	issuerConfMap         map[string]*ACMEConfig
+	certmagicTLSALPNOnly  *certmagic.Config
+	certmagicConfMap      map[string]*certmagic.Config
+	certmagicCache        *certmagic.Cache
+	certmagicStorage      certmagic.Storage
+	done                  chan struct{}
+	Close                 func()
+	netConf               net.ListenConfig
 }
 
 // TODO move to *Listener
@@ -161,19 +160,18 @@ func NewListenConfig(conf Config) *ListenConfig {
 	}
 
 	lc := &ListenConfig{
-		config:                  conf,
-		alpnsByDomain:           domainMatchers,
-		configBySNIALPN:         snialpnMatchers,
-		Context:                 ctx,
-		Close:                   cancel,
-		ACMEDirectoryEndpoint:   directoryEndpoint,
-		issuerConfMap:           issuerConfMap,
-		DisableTLSALPNChallenge: false,
-		certmagicTLSALPNOnly:    nil,
-		certmagicConfMap:        certmagicConfMap,
-		certmagicStorage:        certmagicStorage,
-		certmagicCache:          certmagicCache,
-		done:                    make(chan struct{}),
+		config:                conf,
+		alpnsByDomain:         domainMatchers,
+		configBySNIALPN:       snialpnMatchers,
+		Context:               ctx,
+		Close:                 cancel,
+		ACMEDirectoryEndpoint: directoryEndpoint,
+		issuerConfMap:         issuerConfMap,
+		certmagicTLSALPNOnly:  nil,
+		certmagicConfMap:      certmagicConfMap,
+		certmagicStorage:      certmagicStorage,
+		certmagicCache:        certmagicCache,
+		done:                  make(chan struct{}),
 		netConf: net.ListenConfig{
 			Control: reusePort,
 		},
@@ -386,7 +384,7 @@ func (lc *ListenConfig) newCertmagic(dnsProvider certmagic.DNSProvider) *certmag
 		// Email:                   os.Getenv("DUCKDNS_EMAIL"), // TODO XXX TODO TODO
 		Agreed:                  true,
 		DisableHTTPChallenge:    true,
-		DisableTLSALPNChallenge: lc.DisableTLSALPNChallenge,
+		DisableTLSALPNChallenge: true,
 		DNS01Solver:             dns01Solver,
 		// plus any other customizations you need
 	}
