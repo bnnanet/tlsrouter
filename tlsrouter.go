@@ -37,7 +37,9 @@ func (e ErrorNoTLSConfig) Error() string {
 
 // Config holds the TLS routing configuration and hostname resolutions.
 type Config struct {
+	Handler               *http.ServeMux    `json:"-"`
 	ACMEDirectoryEndpoint string            `json:"-"`
+	AdminMatch            *TLSMatch         `json:"admin"`
 	TLSMatches            []*TLSMatch       `json:"tls_matches"`
 	ACMEConfigs           []*ACMEConfig     `json:"acme,omitempty"`
 	certmagicStorage      certmagic.Storage `json:"-"`
@@ -112,6 +114,7 @@ func (s SNIALPN) SNI() string {
 
 type ListenConfig struct {
 	config                Config
+	adminTunnel           tun.InjectListener
 	alpnsByDomain         map[string][]string
 	configBySNIALPN       map[SNIALPN]*TLSMatch
 	Context               context.Context
@@ -160,6 +163,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 	}
 
 	lc := &ListenConfig{
+		adminTunnel:           tun.NewListener(ctx),
 		config:                conf,
 		alpnsByDomain:         domainMatchers,
 		configBySNIALPN:       snialpnMatchers,
@@ -199,6 +203,25 @@ func NewListenConfig(conf Config) *ListenConfig {
 	// if !acmeConf.Agreed {
 	// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
 	// }
+
+	// setup admin acme
+	for _, domain := range conf.AdminMatch.Domains {
+		acmeConf, exists := issuerConfMap[domain]
+		if !exists {
+			fmt.Fprintf(os.Stderr, "[warn] no ACME config for (internal) admin domain %s\n", domain)
+			continue
+		}
+		if _, exists := lc.certmagicConfMap[domain]; !exists {
+			magic := lc.newCertmagic(acmeConf.DNSProvider)
+			for _, d := range acmeConf.Domains {
+				lc.certmagicConfMap[d] = magic
+			}
+			// note: certmagic doesn't support multi-SAN
+			if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
+				fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+			}
+		}
+	}
 
 	for snialpn, m := range snialpnMatchers {
 		for _, backend := range m.Backends {
@@ -415,6 +438,23 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
+	go func() {
+		protocols := &http.Protocols{}
+		protocols.SetHTTP1(true)
+		protocols.SetHTTP2(true)
+		protocols.SetUnencryptedHTTP2(true)
+
+		proxyServer := &http.Server{
+			Handler: lc.config.Handler,
+			BaseContext: func(_ net.Listener) context.Context {
+				return lc.Context
+			},
+			ConnContext: nil,
+			Protocols:   protocols,
+		}
+		_ = proxyServer.Serve(lc.adminTunnel)
+	}()
+
 	netLn, err := lc.netConf.Listen(lc.Context, "tcp", addr)
 	if err != nil {
 		return err
@@ -492,7 +532,31 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					var err error
 					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
-						return nil, err
+						if !slices.Contains(lc.config.AdminMatch.Domains, domain) {
+							return nil, err
+						}
+
+						var clientALPN string
+						adminALPNs := []string{"h2", "http/1.1"}
+						for _, alpn := range hello.SupportedProtos {
+							if slices.Contains(adminALPNs, alpn) {
+								clientALPN = alpn
+								break
+							}
+						}
+						if len(clientALPN) == 0 {
+							return nil, err
+						}
+
+						backend = &Backend{
+							TerminateTLS: true,
+							Tunnel:       lc.adminTunnel,
+						}
+						_ = hc.Passthru()
+						return &tls.Config{
+							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
+							NextProtos:     []string{clientALPN},
+						}, nil
 					}
 				}
 			}
@@ -533,17 +597,12 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			fmt.Println("DEBUG: TERMINATE THE TLS!!")
 			_ = hc.Passthru()
 
-			magic, exists := lc.certmagicConfMap[domain]
-			if !exists {
-				panic(fmt.Errorf("impossible error: missing certmagic config configured domain"))
-			}
-
 			// TODO check snialpn support wildcards via config
 			// TODO get the cert directly
 			// TODO preconfigure as map on load
 			return &tls.Config{
 				// Certificates: []tls.Certificate{*tlsCert},
-				GetCertificate: magic.GetCertificate,
+				GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
 				NextProtos:     []string{snialpn.ALPN()},
 			}, nil
 		},
@@ -580,7 +639,6 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	}
 
 	fmt.Println("do the next thing...")
-	_ = hc.Passthru() // Why call this here too?
 	if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
 		fmt.Println("PROXY PROTO...")
 		header := &proxyproto.Header{
@@ -930,6 +988,18 @@ func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 }
 
 func LintConfig(conf Config, allowedAlpns []string) error {
+	if len(conf.AdminMatch.Domains) == 0 {
+		return fmt.Errorf("error: 'admin.domains' is empty")
+	}
+
+	for _, domain := range conf.AdminMatch.Domains {
+		d := strings.ToLower(domain)
+
+		if domain != d {
+			return fmt.Errorf("lint: domain is not lowercase: %q", domain)
+		}
+	}
+
 	if len(conf.TLSMatches) == 0 {
 		return fmt.Errorf("error: 'tls_matches' is empty")
 	}
