@@ -119,7 +119,7 @@ type ListenConfig struct {
 	ACMEDirectoryEndpoint   string
 	DisableTLSALPNChallenge bool
 	issuerConfMap           map[string]*ACMEConfig
-	certmagicTLSOnly        *certmagic.Config
+	certmagicTLSALPNOnly    *certmagic.Config
 	certmagicConfMap        map[string]*certmagic.Config
 	certmagicCache          *certmagic.Cache
 	certmagicStorage        certmagic.Storage
@@ -170,7 +170,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		ACMEDirectoryEndpoint:   directoryEndpoint,
 		issuerConfMap:           issuerConfMap,
 		DisableTLSALPNChallenge: false,
-		certmagicTLSOnly:        nil,
+		certmagicTLSALPNOnly:    nil,
 		certmagicConfMap:        certmagicConfMap,
 		certmagicStorage:        certmagicStorage,
 		certmagicCache:          certmagicCache,
@@ -179,7 +179,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			Control: reusePort,
 		},
 	}
-	lc.certmagicTLSOnly = lc.newCertmagicTLSOnly()
+	lc.certmagicTLSALPNOnly = lc.newCertmagicTLSALPNOnly()
 
 	// build up ACME configs
 	for _, acmeConf := range conf.ACMEConfigs {
@@ -214,7 +214,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			if !exists {
 				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (TLS-ALPN)\n", snialpn)
 				// note: certmagic doesn't support multi-SAN
-				if err := lc.certmagicTLSOnly.ManageSync(lc.Context, []string{domain}); err != nil {
+				if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 				}
 				continue
@@ -311,7 +311,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 	return lc
 }
 
-func (lc *ListenConfig) newCertmagicTLSOnly() *certmagic.Config {
+func (lc *ListenConfig) newCertmagicTLSALPNOnly() *certmagic.Config {
 
 	magic := certmagic.New(lc.certmagicCache, certmagic.Config{
 		RenewalWindowRatio: 0.3,
