@@ -1,0 +1,304 @@
+[
+  {
+    "reserved": true,
+    "bytes": "0a0a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "1a1a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "2a2a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "3a3a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "4a4a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "5a5a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "6a6a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "7a7a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "8a8a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "9a9a",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "aaaa",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "baba",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "caca",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "dada",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "eaea",
+    "reference": "[RFC8701]"
+  },
+  {
+    "reserved": true,
+    "bytes": "fafa",
+    "reference": "[RFC8701]"
+  },
+  {
+    "protocol": "HTTP/0.9",
+    "name": "http/0.9",
+    "bytes": "687474702f302e39",
+    "reference": "[RFC1945]"
+  },
+  {
+    "protocol": "HTTP/1.0",
+    "name": "http/1.0",
+    "bytes": "687474702f312e30",
+    "reference": "[RFC1945]"
+  },
+  {
+    "protocol": "HTTP/1.1",
+    "name": "http/1.1",
+    "bytes": "687474702f312e31",
+    "reference": "[RFC9112]"
+  },
+  {
+    "protocol": "SPDY/1",
+    "name": "spdy/1",
+    "bytes": "737064792f31",
+    "reference": "[http://dev.chromium.org/spdy/spdy-protocol/spdy-protocol-draft1]"
+  },
+  {
+    "protocol": "SPDY/2",
+    "name": "spdy/2",
+    "bytes": "737064792f32",
+    "reference": "[http://dev.chromium.org/spdy/spdy-protocol/spdy-protocol-draft2]"
+  },
+  {
+    "protocol": "SPDY/3",
+    "name": "spdy/3",
+    "bytes": "737064792f33",
+    "reference": "[http://dev.chromium.org/spdy/spdy-protocol/spdy-protocol-draft3]"
+  },
+  {
+    "protocol": "Traversal Using Relays around NAT (TURN)",
+    "name": "stun.turn",
+    "bytes": "7374756e2e7475726e",
+    "reference": "[RFC7443]"
+  },
+  {
+    "protocol": "NAT discovery using Session Traversal Utilities for NAT (STUN)",
+    "name": "stun.nat-discovery",
+    "bytes": "7374756e2e6e61742d646973636f76657279",
+    "reference": "[RFC7443]"
+  },
+  {
+    "protocol": "HTTP/2 over TLS",
+    "name": "h2",
+    "bytes": "6832",
+    "reference": "[RFC9113]"
+  },
+  {
+    "protocol": "HTTP/2 over TCP",
+    "name": "h2c",
+    "bytes": "683263",
+    "reference": "[1][RFC9113]"
+  },
+  {
+    "protocol": "WebRTC Media and Data",
+    "name": "webrtc",
+    "bytes": "776562727463",
+    "reference": "[RFC8833]"
+  },
+  {
+    "protocol": "Confidential WebRTC Media and Data",
+    "name": "c-webrtc",
+    "bytes": "632d776562727463",
+    "reference": "[RFC8833]"
+  },
+  {
+    "protocol": "FTP",
+    "name": "ftp",
+    "bytes": "667470",
+    "reference": "[RFC959][RFC4217]"
+  },
+  {
+    "protocol": "IMAP",
+    "name": "imap",
+    "bytes": "696d6170",
+    "reference": "[RFC2595]"
+  },
+  {
+    "protocol": "POP3",
+    "name": "pop3",
+    "bytes": "706f7033",
+    "reference": "[RFC2595]"
+  },
+  {
+    "protocol": "ManageSieve",
+    "name": "managesieve",
+    "bytes": "6d616e6167657369657665",
+    "reference": "[RFC5804]"
+  },
+  {
+    "protocol": "CoAP (over TLS)",
+    "name": "coap",
+    "bytes": "636f6170",
+    "reference": "[RFC8323]"
+  },
+  {
+    "protocol": "CoAP (over DTLS)",
+    "name": "co",
+    "bytes": "636f",
+    "reference": "[draft-lenders-core-coap-dtls-svcb-00]"
+  },
+  {
+    "protocol": "XMPP jabber:client namespace",
+    "name": "xmpp-client",
+    "bytes": "786d70702d636c69656e74",
+    "reference": "[https://xmpp.org/extensions/xep-0368.html]"
+  },
+  {
+    "protocol": "XMPP jabber:server namespace",
+    "name": "xmpp-server",
+    "bytes": "786d70702d736572766572",
+    "reference": "[https://xmpp.org/extensions/xep-0368.html]"
+  },
+  {
+    "protocol": "acme-tls/1",
+    "name": "acme-tls/1",
+    "bytes": "61636d652d746c732f31",
+    "reference": "[RFC8737]"
+  },
+  {
+    "protocol": "OASIS Message Queuing Telemetry Transport (MQTT)",
+    "name": "mqtt",
+    "bytes": "6d717474",
+    "reference": "[http://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html]"
+  },
+  {
+    "protocol": "DNS-over-TLS",
+    "name": "dot",
+    "bytes": "646f74",
+    "reference": "[RFC7858]"
+  },
+  {
+    "protocol": "Network Time Security Key Establishment, version 1",
+    "name": "ntske/1",
+    "bytes": "6e74736b652f31",
+    "reference": "[RFC8915, Section 4]"
+  },
+  {
+    "protocol": "SunRPC",
+    "name": "sunrpc",
+    "bytes": "73756e727063",
+    "reference": "[RFC9289]"
+  },
+  {
+    "protocol": "HTTP/3",
+    "name": "h3",
+    "bytes": "6833",
+    "reference": "[RFC9114]"
+  },
+  {
+    "protocol": "SMB2",
+    "name": "smb",
+    "bytes": "736d62",
+    "reference": "[https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/5606ad47-5ee0-437a-817e-70c366052962]"
+  },
+  {
+    "protocol": "IRC",
+    "name": "irc",
+    "bytes": "697263",
+    "reference": "[RFC1459]"
+  },
+  {
+    "protocol": "NNTP (reading)",
+    "name": "nntp",
+    "bytes": "6e6e7470",
+    "reference": "[RFC3977]"
+  },
+  {
+    "protocol": "NNTP (transit)",
+    "name": "nnsp",
+    "bytes": "6e6e7370",
+    "reference": "[RFC3977]"
+  },
+  {
+    "protocol": "DoQ",
+    "name": "doq",
+    "bytes": "646f71",
+    "reference": "[RFC9250]"
+  },
+  {
+    "protocol": "SIP",
+    "name": "sip/2",
+    "bytes": "7369702f32",
+    "reference": "[RFC3261]"
+  },
+  {
+    "protocol": "TDS/8.0",
+    "name": "tds/8.0",
+    "bytes": "7464732f382e30",
+    "reference": "[[MS-TDS]: Tabular Data Stream Protocol]"
+  },
+  {
+    "protocol": "DICOM",
+    "name": "dicom",
+    "bytes": "6469636f6d",
+    "reference": "[https://www.dicomstandard.org/current]"
+  },
+  {
+    "protocol": "PostgreSQL",
+    "name": "postgresql",
+    "bytes": "706f737467726573716c",
+    "reference": "[https://www.postgresql.org/docs/current/protocol.html]"
+  },
+  {
+    "protocol": "RADIUS/1.0",
+    "name": "radius/1.0",
+    "bytes": "7261646975732f312e30",
+    "reference": "[RFC9765]"
+  },
+  {
+    "protocol": "RADIUS/1.1",
+    "name": "radius/1.1",
+    "bytes": "7261646975732f312e31",
+    "reference": "[RFC9765]"
+  }
+]
