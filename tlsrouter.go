@@ -75,7 +75,7 @@ type Backend struct {
 	Address         string             `json:"address"`
 	Port            uint16             `json:"port"`
 	ALPNs           []string           `json:"-"`
-	Tunnel          tun.InjectListener `json:"-"`
+	HTTPTunnel      tun.InjectListener `json:"-"`
 	PROXYProto      int                `json:"proxy_protocol,omitempty"`
 	TerminateTLS    bool               `json:"terminate_tls"`
 	ForceHTTP       bool               `json:"force_http,omitempty"`
@@ -115,6 +115,8 @@ func (s SNIALPN) SNI() string {
 type ListenConfig struct {
 	config                Config
 	adminTunnel           tun.InjectListener
+	Conns                 sync.Map
+	TLSMismatches         sync.Map
 	alpnsByDomain         map[string][]string
 	configBySNIALPN       map[SNIALPN]*TLSMatch
 	Context               context.Context
@@ -164,6 +166,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 	lc := &ListenConfig{
 		adminTunnel:           tun.NewListener(ctx),
+		Conns:                 sync.Map{},
+		TLSMismatches:         sync.Map{},
 		config:                conf,
 		alpnsByDomain:         domainMatchers,
 		configBySNIALPN:       snialpnMatchers,
@@ -259,7 +263,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 			alpn := snialpn.ALPN()
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
-				backend.Tunnel = tun.NewListener(lc.Context)
+				backend.HTTPTunnel = tun.NewListener(lc.Context)
 
 				target := &url.URL{
 					Scheme: "http",
@@ -318,7 +322,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 					Protocols:   protocols,
 				}
 				go func() {
-					_ = proxyServer.Serve(backend.Tunnel)
+					_ = proxyServer.Serve(backend.HTTPTunnel)
 				}()
 			}
 		}
@@ -438,6 +442,10 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
+	lc.config.Handler.HandleFunc("GET /api/connections", lc.ListConnections)
+	lc.config.Handler.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.CloseRemotes)
+	lc.config.Handler.HandleFunc("DELETE /api/clients/{Service}", lc.CloseClients)
+
 	go func() {
 		protocols := &http.Protocols{}
 		protocols.SetHTTP1(true)
@@ -494,14 +502,19 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 }
 
 func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
+	fmt.Fprintf(os.Stderr, "\n")
+
 	var snialpn SNIALPN
 	var beConn net.Conn
 	var backend *Backend
-	fmt.Fprintf(os.Stderr, "\n")
 
-	hc := newHelloConn(conn)
+	wconn := newWrappedConn(conn)
+	defer func() {
+		lc.Conns.Delete(wconn.ConnID())
+	}()
+
 	// tlsConn.NetConn()
-	tlsConn := tls.Server(hc, &tls.Config{
+	tlsConn := tls.Server(wconn, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			fmt.Fprintf(os.Stderr, "ServerName (SNI): %s\n", hello.ServerName)
 			fmt.Fprintf(os.Stderr, "SupportedProtos (ALPN): %s\n", hello.SupportedProtos)
@@ -529,10 +542,23 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				}
 				// unhappy path
 				if !exists {
+					trackMismatch := func() {
+						key := domain + ":" + alpns[0]
+						vAny, ok := lc.TLSMismatches.Load(key)
+						if !ok {
+							vAny = &atomic.Int32{}
+							lc.TLSMismatches.Store(key, vAny)
+						}
+						v := vAny.(*atomic.Int32)
+						v.Add(1)
+					}
+
 					var err error
 					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
 						if !slices.Contains(lc.config.AdminMatch.Domains, domain) {
+							trackMismatch()
+							snialpn = ""
 							return nil, err
 						}
 
@@ -545,14 +571,17 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 							}
 						}
 						if len(clientALPN) == 0 {
+							trackMismatch()
+							snialpn = ""
 							return nil, err
 						}
 
+						snialpn = NewSNIALPN(domain, alpns[0])
 						backend = &Backend{
 							TerminateTLS: true,
-							Tunnel:       lc.adminTunnel,
+							HTTPTunnel:   lc.adminTunnel,
 						}
-						_ = hc.Passthru()
+						_ = wconn.Passthru()
 						return &tls.Config{
 							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
 							NextProtos:     []string{clientALPN},
@@ -573,10 +602,17 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				if !mcfg.CurrentBackend.CompareAndSwap(n, 0) {
 					mcfg.CurrentBackend.Add(inc)
 				}
-				if b.Tunnel == nil && b.PROXYProto == 0 {
+
+				// Note: this complexity currently doesn't help us
+				//       but in the future we do need a way to mark
+				//       a backend as active or inactive
+
+				isRawTCP := b.HTTPTunnel == nil && b.PROXYProto == 0
+				if isRawTCP {
 					backend = b
 					break
 				}
+
 				var err error
 				beConn, err = getBackendConn(lc.Context, b.Host)
 				if err != nil {
@@ -595,7 +631,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			fmt.Println("DEBUG: TERMINATE THE TLS!!")
-			_ = hc.Passthru()
+			_ = wconn.Passthru()
 
 			// TODO check snialpn support wildcards via config
 			// TODO get the cert directly
@@ -608,34 +644,22 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		},
 	})
 
+	terminate := true
 	if err := tlsConn.Handshake(); err != nil {
-		if errors.Is(err, ErrDoNotTerminate) {
-			fmt.Println("DEBUG 1: No terminate TLS...")
-			if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
-				header := &proxyproto.Header{
-					Version:           byte(backend.PROXYProto),
-					Command:           proxyproto.PROXY,
-					TransportProtocol: proxyproto.TCPv4,
-					SourceAddr:        tlsConn.RemoteAddr().(*net.TCPAddr),
-					DestinationAddr:   beConn.LocalAddr().(*net.TCPAddr),
-				}
-				if _, err = header.WriteTo(beConn); err != nil {
-					return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
-				}
+		if !errors.Is(err, ErrDoNotTerminate) {
+			var errNoTLSConf ErrorNoTLSConfig
+			if errors.As(err, &errNoTLSConf) {
+				// TODO error log channel
+				log.Printf("no tls config: %s", err)
+				return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), err
 			}
-			return hc.copyConn(beConn)
-		}
 
-		var errNoTLSConf ErrorNoTLSConfig
-		if errors.As(err, &errNoTLSConf) {
 			// TODO error log channel
-			log.Printf("no tls config: %s", err)
-			return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
+			log.Printf("unknown tls handshake failure: %s", err)
+			return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), err
 		}
 
-		// TODO error log channel
-		log.Printf("unknown tls handshake failure: %s", err)
-		return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
+		terminate = false
 	}
 
 	fmt.Println("do the next thing...")
@@ -649,27 +673,40 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			DestinationAddr:   beConn.LocalAddr().(*net.TCPAddr),
 		}
 		if _, err := header.WriteTo(beConn); err != nil {
-			return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), err
+			return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), err
 		}
 	}
 
-	fmt.Println("PLAIN CONN...")
-	cConn := NewTLSConn(tlsConn)
-	if backend.Tunnel != nil {
-		fmt.Println("backend.Tunnel.Inject")
+	wconn.SNIALPN = snialpn
+	if terminate {
+		fmt.Println("PLAIN CONN...")
+		cConn := NewPlainConn(tlsConn)
+		wconn.PlainConn = cConn
+	}
+
+	lc.Conns.Store(wconn.ConnID(), wconn)
+
+	if !terminate {
+		fmt.Println("DEBUG 1: No terminate TLS...")
+		return wconn.tunnelTCPConn(beConn)
+	}
+
+	if backend.HTTPTunnel != nil {
+		fmt.Println("backend.HTTPTunnel.Inject")
 		// doesn't block
-		retErr = backend.Tunnel.Inject(cConn)
+		retErr = backend.HTTPTunnel.Inject(wconn.PlainConn)
+		wconn.wg.Wait()
 	} else {
-		fmt.Println("CopyConn(cConn, beConn)")
-		_, _, retErr = CopyConn(cConn, beConn)
+		fmt.Println("TunnelTCPConn(cConn, beConn)")
+		_, _, retErr = TunnelTCPConn(wconn.PlainConn, beConn)
 		_ = conn.Close()
 	}
 	fmt.Println("done")
-	return int64(hc.BytesRead.Load()), int64(hc.BytesWritten.Load()), retErr
+	return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), retErr
 }
 
-// CopyConn is a bi-directional copy, calling io.Copy for both connections
-func CopyConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr error) {
+// TunnelTCPConn is a bi-directional copy, calling io.Copy for both connections
+func TunnelTCPConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr error) {
 	var rErr error
 	var wErr error
 
@@ -722,7 +759,7 @@ func CopyConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr error) 
 	return r, w, retErr
 }
 
-func (hc *tlsHelloConn) copyConn(beConn net.Conn) (r int64, w int64, retErr error) {
+func (wconn *wrappedConn) tunnelTCPConn(beConn net.Conn) (r int64, w int64, retErr error) {
 	var rErr error
 	var wErr error
 
@@ -733,15 +770,15 @@ func (hc *tlsHelloConn) copyConn(beConn net.Conn) (r int64, w int64, retErr erro
 			retErr = wErr
 		}
 
-		_ = hc.Close()
+		_ = wconn.Close()
 		_ = beConn.Close()
 	}()
 
-	conn := hc.Conn
+	conn := wconn.Conn
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	buffers := hc.Passthru()
+	buffers := wconn.Passthru()
 	go func() {
 		defer wg.Done()
 
@@ -850,90 +887,111 @@ func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *TLSM
 	}
 }
 
-func newHelloConn(nc net.Conn) *tlsHelloConn {
-	c := &tlsHelloConn{
-		Conn:         nc,
-		buffers:      make([][]byte, 0, 1),
-		passthru:     false,
-		Connected:    time.Now(),
-		BytesRead:    new(atomic.Uint64),
-		BytesWritten: new(atomic.Uint64),
+func newWrappedConn(conn net.Conn) *wrappedConn {
+	wconn := &wrappedConn{
+		Conn:      conn,
+		buffers:   make([][]byte, 0, 1),
+		Connected: time.Now(),
 	}
+	wconn.wg.Add(1)
 
-	return c
+	return wconn
 }
 
-type tlsHelloConn struct {
+type wrappedConn struct {
 	net.Conn
 	passthru     bool
 	buffers      [][]byte
+	SNIALPN      SNIALPN
+	PlainConn    *PlainConn
 	Connected    time.Time
-	BytesRead    *atomic.Uint64
-	BytesWritten *atomic.Uint64
+	BytesRead    atomic.Uint64
+	BytesWritten atomic.Uint64
+	LastRead     atomic.Int64
+	LastWrite    atomic.Int64
+	wg           sync.WaitGroup
+	once         sync.Once
 }
 
-func (hc *tlsHelloConn) Passthru() [][]byte {
-	bufs := hc.buffers
-	hc.buffers = nil
-	hc.passthru = true
+func (wconn *wrappedConn) ConnID() string {
+	ipAndPort := wconn.RemoteAddr().String()
+	tcpOrUDP := wconn.RemoteAddr().Network()
+	return fmt.Sprintf("%s:%s:%d", ipAndPort, tcpOrUDP, wconn.Connected.UnixMilli())
+}
+
+func (wconn *wrappedConn) Passthru() [][]byte {
+	bufs := wconn.buffers
+	wconn.buffers = nil
+	wconn.passthru = true
 	return bufs
 }
 
-func (hc *tlsHelloConn) Read(b []byte) (int, error) {
-	n, err := hc.Conn.Read(b)
-	hc.BytesRead.Add(uint64(n))
-	if hc.passthru {
+func (wconn *wrappedConn) Read(b []byte) (int, error) {
+	n, err := wconn.Conn.Read(b)
+	wconn.BytesRead.Add(uint64(n))
+	wconn.LastRead.Store(time.Now().UnixMilli())
+
+	if err != nil {
+		wconn.once.Do(wconn.wg.Done)
+	}
+	if wconn.passthru {
 		return n, err
 	}
 
-	hc.buffers = append(hc.buffers, b[0:n])
+	wconn.buffers = append(wconn.buffers, b[0:n])
 	return n, err
 }
 
-func (hc *tlsHelloConn) Write(b []byte) (int, error) {
-	if hc.passthru {
-		n, err := hc.Conn.Write(b)
-		hc.BytesWritten.Add(uint64(n))
+func (wconn *wrappedConn) Write(b []byte) (int, error) {
+	wconn.LastWrite.Store(time.Now().UnixMilli())
+
+	if wconn.passthru {
+		n, err := wconn.Conn.Write(b)
+		if err != nil {
+			wconn.once.Do(wconn.wg.Done)
+		}
+		wconn.BytesWritten.Add(uint64(n))
 		return n, err
 	}
 
 	fmt.Fprintf(os.Stderr, "Handshake: %x\n", b)
-	return 0, fmt.Errorf("sanity fail: tlsHelloConn does not support Write")
+	wconn.once.Do(wconn.wg.Done)
+	return 0, fmt.Errorf("sanity fail: wrappedConn does not support Write")
 }
 
-func (hc *tlsHelloConn) Close() error {
-	if hc.passthru {
-		return hc.Conn.Close()
+func (wconn *wrappedConn) Close() error {
+	wconn.once.Do(wconn.wg.Done)
+
+	if wconn.passthru {
+		return wconn.Conn.Close()
 	}
 
-	panic(fmt.Errorf("sanity fail: tlsHelloConn does not support Close"))
+	panic(fmt.Errorf("sanity fail: wrappedConn does not support Close"))
 }
 
-type TLSConn struct {
+type PlainConn struct {
 	*tls.Conn
-	Connected    time.Time
-	BytesRead    *atomic.Uint64
-	BytesWritten *atomic.Uint64
+	BytesRead    atomic.Uint64
+	BytesWritten atomic.Uint64
 }
 
-func NewTLSConn(tc *tls.Conn) *TLSConn {
-	c := &TLSConn{
+func NewPlainConn(tc *tls.Conn) *PlainConn {
+	c := &PlainConn{
 		Conn:         tc,
-		Connected:    time.Now(),
-		BytesRead:    new(atomic.Uint64),
-		BytesWritten: new(atomic.Uint64),
+		BytesRead:    atomic.Uint64{},
+		BytesWritten: atomic.Uint64{},
 	}
 
 	return c
 }
 
-func (tc *TLSConn) Read(b []byte) (int, error) {
+func (tc *PlainConn) Read(b []byte) (int, error) {
 	n, err := tc.Conn.Read(b)
 	tc.BytesRead.Add(uint64(n))
 	return n, err
 }
 
-func (tc *TLSConn) Write(b []byte) (int, error) {
+func (tc *PlainConn) Write(b []byte) (int, error) {
 	n, err := tc.Conn.Write(b)
 	tc.BytesWritten.Add(uint64(n))
 	return n, err
