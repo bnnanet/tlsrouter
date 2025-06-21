@@ -294,16 +294,16 @@ func formatDuration(d time.Duration) string {
 	if days > 0 {
 		parts = append(parts, fmt.Sprintf("%dd", days))
 	}
-	if hours > 0 {
+	if len(parts) > 0 || hours > 0 {
 		parts = append(parts, fmt.Sprintf("%dh", hours))
 	}
-	if minutes > 0 {
+	if len(parts) > 0 || minutes > 0 {
 		parts = append(parts, fmt.Sprintf("%dm", minutes))
 	}
-	if seconds > 0 {
+	if len(parts) > 0 || seconds > 0 {
 		parts = append(parts, fmt.Sprintf("%ds", seconds))
 	}
-	if seconds == 0 || len(parts) == 0 {
+	if len(parts) == 0 {
 		d -= time.Duration(seconds) * time.Second
 		millis := int(d / time.Millisecond)
 		parts = append(parts, fmt.Sprintf("%dms", millis))
