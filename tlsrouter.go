@@ -620,6 +620,13 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
 	lc.config.Handler.HandleFunc("GET /api/config", lc.GetConfig)
+	// lc.config.Handler.HandleFunc("POST /api/apps", lc.AddApp)
+	// lc.config.Handler.HandleFunc("PATCH /api/apps/{App}/services/{Srv}/domains", lc.AddOrReplaceDomain)
+	// lc.config.Handler.HandleFunc("PUT /api/apps/{App}/dns_providers", lc.SetDNSProvider)
+	// lc.config.Handler.HandleFunc("PUT /api/apps/{App}/backends/{Addr}", lc.AddOrReplaceBackend)
+	// lc.config.Handler.HandleFunc("DELETE /api/apps/{App}/backends/{Addr}", lc.AddOrReplaceBackend)
+	// lc.config.Handler.HandleFunc("POST /api/apps/{App}/services", lc.AddService)
+	// lc.config.Handler.HandleFunc("PUT /api/config/{AppSlug}/services/{ServiceSlug}", lc.SetService)
 	lc.config.Handler.HandleFunc("GET /api/connections", lc.ListConnections)
 	lc.config.Handler.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.CloseRemotes)
 	lc.config.Handler.HandleFunc("DELETE /api/clients/{Service}", lc.CloseClients)
