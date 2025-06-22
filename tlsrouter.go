@@ -44,21 +44,19 @@ func (e ErrorNoTLSConfig) Error() string {
 // Note: JSON keys are encoded in a consistent order, as per struct-order,
 // and generic map keys are sorted.
 type Config struct {
+	Revision              string             `json:"rev,omitempty"`
+	Hash                  string             `json:"hash,omitempty"`
 	Handler               *http.ServeMux     `json:"-"`
 	ACMEDirectoryEndpoint string             `json:"-"`
 	FileTime              time.Time          `json:"-"` // from file date
 	TabVault              *tabvault.TabVault `json:"-"`
-	Version               string             `json:"version"`
-	Hash                  string             `json:"hash"`
-	AdminMatch            *TLSMatch          `json:"admin"`
-	TLSMatches            []*TLSMatch        `json:"tls_matches"`
-	ACMEConfigs           []*ACMEConfig      `json:"acme,omitempty"`
+	AdminDNS              *ConfigDNS         `json:"admin"`
+	Apps                  []*ConfigApp       `json:"apps"`
 	certmagicStorage      certmagic.Storage  `json:"-"`
-	HostnameOverrides     map[string]string  `json:"hostname_overrides"`
 }
 
 func (c Config) ShortSHA2() string {
-	c.Version = ""
+	c.Revision = ""
 	c.Hash = ""
 	b, _ := json.Marshal(c)
 	h := sha256.Sum256(b)
@@ -67,18 +65,39 @@ func (c Config) ShortSHA2() string {
 	return hash
 }
 
-// TLSMatch defines a rule for matching domains and ALPNs to backends.
-type TLSMatch struct {
-	Domains        []string       `json:"domains"`
-	ALPNs          []string       `json:"alpns"`
-	CurrentBackend *atomic.Uint32 `json:"-"`
-	Backends       []*Backend     `json:"backends"`             // Standardizing on "backends"
-	ACME           *struct{}      `json:"acme,omitempty"`       // TODO
-	TLSConfig      *struct{}      `json:"tls_config,omitempty"` // TODO
-	// ALPNBackends   map[string][]*Backend `json:"-"`
+// ConfigApp describes an arbitrarily relationship between services
+type ConfigApp struct {
+	Label        string           `json:"label"`
+	Slug         string           `json:"slug"`
+	Comment      string           `json:"comment,omitempty"`
+	Disabled     bool             `json:"disabled,omitempty"`
+	DNSProviders []*ConfigDNS     `json:"dns_providers,omitempty"`
+	Services     []*ConfigService `json:"services"`
 }
 
-type ACMEConfig struct {
+// ConfigService defines a rule for matching domains and ALPNs to backends.
+type ConfigService struct {
+	Slug           string         `json:"slug"`
+	Comment        string         `json:"comment,omitempty"`
+	Disabled       bool           `json:"disabled,omitempty"`
+	Domains        []string       `json:"domains"`
+	ALPNs          []string       `json:"alpns"`
+	Backends       []*Backend     `json:"backends"`
+	CurrentBackend *atomic.Uint32 `json:"-"`
+}
+
+// ConfigDNS defines libdns-style DNS API options
+type ConfigDNS struct {
+	Slug     string   `json:"slug"`
+	Comment  string   `json:"comment,omitempty"`
+	Disabled bool     `json:"disabled,omitempty"`
+	Domains  []string `json:"domains"`
+	XDomains []string `json:"excluded_domains"`
+	API      string   `json:"api"`
+	APIToken string   `json:"api_token"`
+}
+
+type ACMEDNS struct {
 	Domains       []string              `json:"domains"`
 	DNSProvider   certmagic.DNSProvider `json:"-"`
 	DNS01Provider struct {
@@ -91,20 +110,23 @@ type ACMEConfig struct {
 
 // Backend defines a proxy destination.
 type Backend struct {
-	// Active          *atomic.Bool `json:"-"`
-	Host            string             `json:"-"`
+	Slug            string             `json:"slug"`
+	Comment         string             `json:"comment,omitempty"`
+	Disabled        bool               `json:"disabled,omitempty"`
+	ALPNs           []string           `json:"alpns"`
 	Address         string             `json:"address"`
 	Port            uint16             `json:"port"`
-	ALPNs           []string           `json:"-"`
+	Host            string             `json:"-"`
 	HTTPTunnel      tun.InjectListener `json:"-"`
 	PROXYProto      int                `json:"proxy_protocol,omitempty"`
 	TerminateTLS    bool               `json:"terminate_tls"`
 	ForceHTTP       bool               `json:"force_http,omitempty"`
 	ConnectTLS      bool               `json:"connect_tls"`
 	ConnectInsecure bool               `json:"connect_insecure"`
-	// ConnectSNI         string   `json:"connect_sni,omitempty"`
-	// ConnectALPNs       string   `json:"connect_alpn,omitempty"`
-	// ConnectCertRootPEMs [][]byte `json:"connect_cert_root_pems,omitempty"`
+	// Healthy         *atomic.Bool       `json:"-"`
+	// ConnectSNI      string             `json:"connect_sni,omitempty"`
+	// ConnectALPNs    string             `json:"connect_alpn,omitempty"`
+	// ConnectCertRootPEMs [][]byte       `json:"connect_cert_root_pems,omitempty"`
 }
 
 type SNIALPN string
@@ -131,7 +153,7 @@ func (s SNIALPN) SNI() string {
 	return parts[0]
 }
 
-// type Matchers map[string]TLSMatch
+// type Matchers map[string]ConfigService
 
 type ListenConfig struct {
 	config                Config
@@ -139,10 +161,10 @@ type ListenConfig struct {
 	Conns                 sync.Map
 	TLSMismatches         sync.Map
 	alpnsByDomain         map[string][]string
-	configBySNIALPN       map[SNIALPN]*TLSMatch
+	configBySNIALPN       map[SNIALPN]*ConfigService
 	Context               context.Context
 	ACMEDirectoryEndpoint string
-	issuerConfMap         map[string]*ACMEConfig
+	issuerConfMap         map[string]*ACMEDNS
 	certmagicTLSALPNOnly  *certmagic.Config
 	certmagicConfMap      map[string]*certmagic.Config
 	certmagicCache        *certmagic.Cache
@@ -162,7 +184,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	issuerConfMap := make(map[string]*ACMEConfig)
+	issuerConfMap := make(map[string]*ACMEDNS)
 	certmagicConfMap := make(map[string]*certmagic.Config)
 	certmagicStorage := conf.certmagicStorage
 	if certmagicStorage == nil {
@@ -208,50 +230,180 @@ func NewListenConfig(conf Config) *ListenConfig {
 	lc.certmagicTLSALPNOnly = lc.newCertmagicTLSALPNOnly()
 
 	// build up ACME configs
-	for _, acmeConf := range conf.ACMEConfigs {
-		switch acmeConf.DNS01Provider.API {
+	dnsConfByDomain := make(map[string]*ConfigDNS)
+
+	// setup admin acme
+	if len(conf.AdminDNS.Domains) == 0 {
+		fmt.Fprintf(os.Stderr, "[warn] no (internal) admin domains\n")
+	}
+	if len(conf.AdminDNS.API) == 0 ||
+		len(conf.AdminDNS.APIToken) == 0 ||
+		conf.AdminDNS.Disabled {
+		fmt.Fprintf(
+			os.Stderr,
+			"[warn] no ACME config for (internal) admin domains %s\n",
+			strings.Join(conf.AdminDNS.Domains, ", "),
+		)
+	} else {
+		for _, domain := range conf.AdminDNS.Domains {
+			dnsConfByDomain[domain] = conf.AdminDNS
+		}
+	}
+
+	// setup app acme
+	emptyDNSConf := new(ConfigDNS)
+	for _, app := range conf.Apps {
+		appSlugs := make(map[string]string)
+
+		// TODO
+		// - check that all ACME DNS Domains are used by a service in the app
+		// - check that domains aren't duplicated (for admin too)
+
+		wildDNSConf := emptyDNSConf
+		for _, dnsConf := range app.DNSProviders {
+			kindOfThing, exists := appSlugs[dnsConf.Slug]
+			if exists {
+				fmt.Fprintf(
+					os.Stderr,
+					"conflicting duplicate slug %q, already used by %q\n",
+					dnsConf.Slug,
+					kindOfThing,
+				)
+			} else {
+				appSlugs[dnsConf.Slug] = "DNSConfig"
+			}
+
+			if len(dnsConf.Domains) == 0 {
+				dnsConf.Domains = []string{"*"}
+			}
+			if wildDNSConf == emptyDNSConf {
+				wildDNSConf = dnsConf
+				continue
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"ignoring duplicate wildcard DNS provider %q, already provided by %q\n",
+				dnsConf.Slug,
+				wildDNSConf.Slug,
+			)
+		}
+
+		for _, dnsConf := range app.DNSProviders {
+			if len(dnsConf.XDomains) > 0 {
+				if dnsConf.Domains[0] == "*" {
+					for _, xdomain := range dnsConf.XDomains {
+						oldDNSConf, exists := dnsConfByDomain[xdomain]
+						if !exists {
+							dnsConfByDomain[xdomain] = emptyDNSConf
+							continue
+						}
+						if oldDNSConf == emptyDNSConf {
+							continue
+						}
+						fmt.Fprintf(
+							os.Stderr,
+							"ignoring domain exclude for %q which is included by %q\n",
+							xdomain,
+							oldDNSConf.Slug,
+						)
+					}
+				} else {
+					fmt.Fprintf(
+						os.Stderr,
+						"ignoring 'excluded_domains' for non-wildcard dns provider %q\n",
+						dnsConf.Slug,
+					)
+				}
+			}
+			for _, domain := range dnsConf.Domains {
+				oldDNSConf, exists := dnsConfByDomain[domain]
+				if !exists {
+					dnsConfByDomain[domain] = dnsConf
+					continue
+				}
+				if oldDNSConf == emptyDNSConf {
+					fmt.Fprintf(
+						os.Stderr,
+						"ignoring domain exclude for %q which is included by %q\n",
+						domain,
+						dnsConf.Slug,
+					)
+					dnsConfByDomain[domain] = dnsConf
+				}
+				if oldDNSConf.API == dnsConf.API &&
+					oldDNSConf.APIToken == dnsConf.APIToken {
+					continue
+				}
+				fmt.Fprintf(
+					os.Stderr,
+					"duplicate dns provider for %q: %q (selected), %q (ignored)\n",
+					domain,
+					oldDNSConf.Slug,
+					dnsConf.Slug,
+				)
+			}
+		}
+
+		for _, srv := range app.Services {
+			for _, domain := range srv.Domains {
+				_, exists := dnsConfByDomain[domain]
+				if !exists {
+					dnsConfByDomain[domain] = wildDNSConf
+				}
+			}
+		}
+	}
+
+	// build up all acme configs for all configured domains
+	for domain, dnsConf := range dnsConfByDomain {
+		switch dnsConf.API {
 		case "":
 			continue
 		case "duckdns":
-			apiToken := acmeConf.DNS01Provider.Config.APIToken
+			apiToken := dnsConf.APIToken
 			if strings.HasPrefix(apiToken, "vault://") {
 				id := strings.TrimPrefix(apiToken, "vault://")
 				apiToken = lc.config.TabVault.Get(id)
 			}
-			acmeConf.DNSProvider = &duckdns.Provider{
-				APIToken: apiToken,
+			issuerConfMap[domain] = &ACMEDNS{
+				DNSProvider: &duckdns.Provider{
+					APIToken: apiToken,
+				},
 			}
 		default:
-			panic(fmt.Errorf("API %q is not implemented yet", acmeConf.DNS01Provider.API))
+			panic(fmt.Errorf("API %q is not implemented yet", dnsConf.API))
+		}
+	}
+
+	enabledDomains := make(map[string]struct{}) // TODO check vs configured
+	for _, domain := range conf.AdminDNS.Domains {
+		fmt.Println("load cmcm domain", domain)
+		if _, exists := lc.certmagicConfMap[domain]; exists {
+			continue
 		}
 
-		for _, domain := range acmeConf.Domains {
-			issuerConfMap[domain] = acmeConf
+		acmeConf, exists := issuerConfMap[domain]
+		fmt.Println("load cmcm acme", exists, acmeConf)
+		if !exists {
+			continue
+		}
+		enabledDomains[domain] = struct{}{}
+
+		if _, exists := lc.certmagicConfMap[domain]; exists {
+			continue
+		}
+
+		magic := lc.newCertmagic(acmeConf.DNSProvider)
+		lc.certmagicConfMap[domain] = magic
+		// note: certmagic doesn't support multi-SAN
+		if err := magic.ManageSync(lc.Context, []string{domain}); err != nil {
+			fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 		}
 	}
 
 	// if !acmeConf.Agreed {
 	// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
 	// }
-
-	// setup admin acme
-	for _, domain := range conf.AdminMatch.Domains {
-		acmeConf, exists := issuerConfMap[domain]
-		if !exists {
-			fmt.Fprintf(os.Stderr, "[warn] no ACME config for (internal) admin domain %s\n", domain)
-			continue
-		}
-		if _, exists := lc.certmagicConfMap[domain]; !exists {
-			magic := lc.newCertmagic(acmeConf.DNSProvider)
-			for _, d := range acmeConf.Domains {
-				lc.certmagicConfMap[d] = magic
-			}
-			// note: certmagic doesn't support multi-SAN
-			if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
-				fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
-			}
-		}
-	}
 
 	for snialpn, m := range snialpnMatchers {
 		for _, backend := range m.Backends {
@@ -273,11 +425,10 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 			if _, exists := lc.certmagicConfMap[domain]; !exists {
 				magic := lc.newCertmagic(acmeConf.DNSProvider)
-				for _, d := range acmeConf.Domains {
-					lc.certmagicConfMap[d] = magic
-				}
+				lc.certmagicConfMap[domain] = magic
+				enabledDomains[domain] = struct{}{}
 				// note: certmagic doesn't support multi-SAN
-				if err := magic.ManageSync(lc.Context, acmeConf.Domains); err != nil {
+				if err := magic.ManageSync(lc.Context, []string{domain}); err != nil {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 				}
 			}
@@ -437,7 +588,7 @@ func (lc *ListenConfig) newCertmagic(dnsProvider certmagic.DNSProvider) *certmag
 		// Email:                   os.Getenv("DUCKDNS_EMAIL"), // TODO XXX TODO TODO
 		Agreed:                  true,
 		DisableHTTPChallenge:    true,
-		DisableTLSALPNChallenge: true,
+		DisableTLSALPNChallenge: dns01Solver != nil,
 		DNS01Solver:             dns01Solver,
 		// plus any other customizations you need
 	}
@@ -583,7 +734,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					var err error
 					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
-						if !slices.Contains(lc.config.AdminMatch.Domains, domain) {
+						if !slices.Contains(lc.config.AdminDNS.Domains, domain) {
 							trackMismatch()
 							snialpn = ""
 							return nil, err
@@ -609,6 +760,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 							HTTPTunnel:   lc.adminTunnel,
 						}
 						_ = wconn.Passthru()
+						fmt.Println("2 yo yo yo", domain, lc.certmagicConfMap[domain])
 						return &tls.Config{
 							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
 							NextProtos:     []string{clientALPN},
@@ -659,6 +811,8 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 			fmt.Println("DEBUG: TERMINATE THE TLS!!")
 			_ = wconn.Passthru()
+
+			fmt.Println("yo yo yo", domain, lc.certmagicConfMap[domain])
 
 			// TODO check snialpn support wildcards via config
 			// TODO get the cert directly
@@ -868,7 +1022,7 @@ func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", backendAddr)
 }
 
-func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *TLSMatch, error) {
+func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *ConfigService, error) {
 	parentDomain := domain
 
 	// we already checked the first two, if any
@@ -1024,76 +1178,79 @@ func (tc *PlainConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
+func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*ConfigService) {
 	domainALPNMatchers := map[string][]string{}
-	snialpnMatchers := map[SNIALPN]*TLSMatch{}
+	snialpnMatchers := map[SNIALPN]*ConfigService{}
 
-	for _, m := range conf.TLSMatches {
-		if len(m.Backends) == 0 {
-			fmt.Println("debug: warn: empty backends")
-			continue
-		}
+	for _, app := range conf.Apps {
+		for _, srv := range app.Services {
+			if len(srv.Backends) == 0 {
+				fmt.Println("debug: warn: empty backends")
+				continue
+			}
 
-		for _, domain := range m.Domains {
-			// Example.com => example.com
-			domain = strings.ToLower(domain)
+			for _, domain := range srv.Domains {
+				// Example.com => example.com
+				domain = strings.ToLower(domain)
 
-			// *.example.com => .example.com
-			domain = strings.TrimPrefix(domain, "*")
+				// *.example.com => .example.com
+				domain = strings.TrimPrefix(domain, "*")
 
-			alpns := domainALPNMatchers[domain]
-			for _, alpn := range m.ALPNs {
-				if !slices.Contains(alpns, alpn) {
-					alpns = append(alpns, alpn)
-					domainALPNMatchers[domain] = alpns
-				}
-
-				snialpn := NewSNIALPN(domain, alpn)
-
-				tlsMatch := snialpnMatchers[snialpn]
-				if tlsMatch == nil {
-					tlsMatch = &TLSMatch{
-						CurrentBackend: new(atomic.Uint32),
-						ACME:           m.ACME,
-						TLSConfig:      m.TLSConfig,
+				alpns := domainALPNMatchers[domain]
+				for _, alpn := range srv.ALPNs {
+					if !slices.Contains(alpns, alpn) {
+						alpns = append(alpns, alpn)
+						domainALPNMatchers[domain] = alpns
 					}
-					snialpnMatchers[snialpn] = tlsMatch
-				}
 
-				for _, b := range m.Backends {
-					// fmt.Printf("\n\nDEBUG: m.Backends[i] %#v\n", b)
-					b.Host = fmt.Sprintf("%s:%d", b.Address, b.Port)
-					tlsMatch.Backends = append(tlsMatch.Backends, b)
+					snialpn := NewSNIALPN(domain, alpn)
+
+					tlsMatch := snialpnMatchers[snialpn]
+					if tlsMatch == nil {
+						tlsMatch = &ConfigService{
+							CurrentBackend: new(atomic.Uint32),
+						}
+						snialpnMatchers[snialpn] = tlsMatch
+					}
+
+					for _, b := range srv.Backends {
+						// fmt.Printf("\n\nDEBUG: m.Backends[i] %#v\n", b)
+						b.Host = fmt.Sprintf("%s:%d", b.Address, b.Port)
+						tlsMatch.Backends = append(tlsMatch.Backends, b)
+					}
 				}
 			}
 		}
-	}
 
-	for _, acmeConf := range conf.ACMEConfigs {
-		if len(acmeConf.DNS01Provider.Config.APIToken) == 0 {
-			continue
+		for i, dnsConf := range app.DNSProviders {
+			if len(dnsConf.APIToken) == 0 {
+				continue
+			}
+
+			if strings.HasPrefix(dnsConf.APIToken, "vault://") {
+				continue
+			}
+
+			id, err := conf.TabVault.Add(dnsConf.APIToken)
+			if err != nil {
+				panic("TabVault could not be written to")
+			}
+			dnsConf.APIToken = "vault://" + id
+
+			app.DNSProviders[i] = dnsConf
 		}
 
-		if strings.HasPrefix(acmeConf.DNS01Provider.Config.APIToken, "vault://") {
-			continue
-		}
-
-		id, err := conf.TabVault.Add(acmeConf.DNS01Provider.Config.APIToken)
-		if err != nil {
-			panic("TabVault could not be written to")
-		}
-		acmeConf.DNS01Provider.Config.APIToken = "vault://" + id
 	}
 
 	return domainALPNMatchers, snialpnMatchers
 }
 
 func LintConfig(conf Config, allowedAlpns []string) error {
-	if len(conf.AdminMatch.Domains) == 0 {
+	if len(conf.AdminDNS.Domains) == 0 {
 		return fmt.Errorf("error: 'admin.domains' is empty")
 	}
 
-	for _, domain := range conf.AdminMatch.Domains {
+	for _, domain := range conf.AdminDNS.Domains {
 		d := strings.ToLower(domain)
 
 		if domain != d {
@@ -1101,51 +1258,70 @@ func LintConfig(conf Config, allowedAlpns []string) error {
 		}
 	}
 
-	if len(conf.TLSMatches) == 0 {
-		return fmt.Errorf("error: 'tls_matches' is empty")
+	var hasActiveService bool
+	for _, app := range conf.Apps {
+		if app.Disabled {
+			continue
+		}
+		for _, srv := range app.Services {
+			if srv.Disabled {
+				continue
+			}
+			hasActiveService = true
+			break
+		}
+		if hasActiveService {
+			break
+		}
+	}
+	if !hasActiveService {
+		// TODO once we can edit the config via API, this is not a problem
+		return fmt.Errorf("error: no 'apps' with active (non-disabled) 'services'")
 	}
 
-	for _, match := range conf.TLSMatches {
-		snialpns := strings.Join(match.Domains, ",") + "; " + strings.Join(match.ALPNs, ",")
+	for _, app := range conf.Apps {
+		for _, srv := range app.Services {
+			snialpns := strings.Join(srv.Domains, ",") + "; " + strings.Join(srv.ALPNs, ",")
 
-		for _, domain := range match.Domains {
-			d := strings.ToLower(domain)
+			for _, domain := range srv.Domains {
+				d := strings.ToLower(domain)
 
-			if domain != d {
-				return fmt.Errorf("lint: domain is not lowercase: %q", domain)
-			}
-
-			if strings.HasPrefix(domain, "*") {
-				if !strings.HasPrefix(domain, "*.") {
-					return fmt.Errorf("lint: invalid use of wildcard %q (must be '*.')", domain)
+				if domain != d {
+					return fmt.Errorf("lint: domain is not lowercase: %q", domain)
 				}
-			}
-		}
 
-		if len(allowedAlpns) > 0 {
-			for _, alpn := range match.ALPNs {
-				if !slices.Contains(allowedAlpns, alpn) {
-					if alpn != "*" {
-						return fmt.Errorf("lint: unknown alpn %q", alpn)
+				if strings.HasPrefix(domain, "*") {
+					if !strings.HasPrefix(domain, "*.") {
+						return fmt.Errorf("lint: invalid use of wildcard %q (must be '*.')", domain)
 					}
 				}
 			}
-		}
 
-		if len(match.ALPNs) == 0 {
-			return fmt.Errorf("domains set %q have no 'alpns' defined", snialpns)
-		}
-
-		if len(match.Backends) == 0 {
-			return fmt.Errorf("domains+alpns set %q have no 'backends' defined", snialpns)
-		}
-
-		for i, b := range match.Backends {
-			if b.Address == "" {
-				return fmt.Errorf("target %d in set %q has empty 'address'", i, snialpns)
+			if len(allowedAlpns) > 0 {
+				for _, alpn := range srv.ALPNs {
+					if !slices.Contains(allowedAlpns, alpn) {
+						if alpn != "*" {
+							return fmt.Errorf("lint: unknown alpn %q", alpn)
+						}
+					}
+				}
 			}
-			if b.Port == 0 {
-				return fmt.Errorf("target %d in set %q has empty 'port'", i, snialpns)
+
+			if len(srv.ALPNs) == 0 {
+				return fmt.Errorf("domains set %q have no 'alpns' defined", snialpns)
+			}
+
+			if len(srv.Backends) == 0 {
+				return fmt.Errorf("domains+alpns set %q have no 'backends' defined", snialpns)
+			}
+
+			for i, b := range srv.Backends {
+				if b.Address == "" {
+					return fmt.Errorf("target %d in set %q has empty 'address'", i, snialpns)
+				}
+				if b.Port == 0 {
+					return fmt.Errorf("target %d in set %q has empty 'port'", i, snialpns)
+				}
 			}
 		}
 	}
