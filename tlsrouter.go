@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/bnnanet/tlsrouter/net/tun"
+	"github.com/bnnanet/tlsrouter/tabvault"
+
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
@@ -42,21 +44,25 @@ func (e ErrorNoTLSConfig) Error() string {
 // Note: JSON keys are encoded in a consistent order, as per struct-order,
 // and generic map keys are sorted.
 type Config struct {
-	Handler               *http.ServeMux    `json:"-"`
-	ACMEDirectoryEndpoint string            `json:"-"`
-	FileTime              time.Time         `json:"-"` // from file date
-	Version               string            `json:"version"`
-	AdminMatch            *TLSMatch         `json:"admin"`
-	TLSMatches            []*TLSMatch       `json:"tls_matches"`
-	ACMEConfigs           []*ACMEConfig     `json:"acme,omitempty"`
-	certmagicStorage      certmagic.Storage `json:"-"`
-	HostnameOverrides     map[string]string `json:"hostname_overrides"`
+	Handler               *http.ServeMux     `json:"-"`
+	ACMEDirectoryEndpoint string             `json:"-"`
+	FileTime              time.Time          `json:"-"` // from file date
+	TabVault              *tabvault.TabVault `json:"-"`
+	Version               string             `json:"version"`
+	Hash                  string             `json:"hash"`
+	AdminMatch            *TLSMatch          `json:"admin"`
+	TLSMatches            []*TLSMatch        `json:"tls_matches"`
+	ACMEConfigs           []*ACMEConfig      `json:"acme,omitempty"`
+	certmagicStorage      certmagic.Storage  `json:"-"`
+	HostnameOverrides     map[string]string  `json:"hostname_overrides"`
 }
 
 func (c Config) ShortSHA2() string {
+	c.Hash = ""
 	b, _ := json.Marshal(c)
 	h := sha256.Sum256(b)
-	return "h" + hex.EncodeToString(h[:4])[:7]
+	c.Hash = "h" + hex.EncodeToString(h[:4])[:7]
+	return c.Hash
 }
 
 // TLSMatch defines a rule for matching domains and ALPNs to backends.
@@ -205,8 +211,13 @@ func NewListenConfig(conf Config) *ListenConfig {
 		case "":
 			continue
 		case "duckdns":
+			apiToken := acmeConf.DNS01Provider.Config.APIToken
+			if strings.HasPrefix(apiToken, "vault://") {
+				id := strings.TrimPrefix(apiToken, "vault://")
+				apiToken = lc.config.TabVault.Get(id)
+			}
 			acmeConf.DNSProvider = &duckdns.Provider{
-				APIToken: acmeConf.DNS01Provider.Config.APIToken,
+				APIToken: apiToken,
 			}
 		default:
 			panic(fmt.Errorf("API %q is not implemented yet", acmeConf.DNS01Provider.API))
@@ -455,6 +466,7 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
+	lc.config.Handler.HandleFunc("GET /api/config", lc.GetConfig)
 	lc.config.Handler.HandleFunc("GET /api/connections", lc.ListConnections)
 	lc.config.Handler.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.CloseRemotes)
 	lc.config.Handler.HandleFunc("DELETE /api/clients/{Service}", lc.CloseClients)
@@ -1053,6 +1065,22 @@ func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*TLSMatch) {
 				}
 			}
 		}
+	}
+
+	for _, acmeConf := range conf.ACMEConfigs {
+		if len(acmeConf.DNS01Provider.Config.APIToken) == 0 {
+			continue
+		}
+
+		if strings.HasPrefix(acmeConf.DNS01Provider.Config.APIToken, "vault://") {
+			continue
+		}
+
+		id, err := conf.TabVault.Add(acmeConf.DNS01Provider.Config.APIToken)
+		if err != nil {
+			panic("TabVault could not be written to")
+		}
+		acmeConf.DNS01Provider.Config.APIToken = "vault://" + id
 	}
 
 	return domainALPNMatchers, snialpnMatchers
