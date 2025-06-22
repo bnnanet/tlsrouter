@@ -251,11 +251,13 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(conf)
 	_, _ = tlsrouter.NormalizeConfig(conf)
 
-	for _, site := range conf.TLSMatches {
-		snialpns := strings.Join(site.Domains, ",") + "; " + strings.Join(site.ALPNs, ",")
-		fmt.Printf("   %s\n", snialpns)
-		for _, b := range site.Backends {
-			fmt.Printf("      %s:%d\n", b.Address, b.Port)
+	for _, app := range conf.Apps {
+		for _, srv := range app.Services {
+			snialpns := strings.Join(srv.Domains, ",") + "; " + strings.Join(srv.ALPNs, ",")
+			fmt.Printf("   %s\n", snialpns)
+			for _, b := range srv.Backends {
+				fmt.Printf("      %s:%d\n", b.Address, b.Port)
+			}
 		}
 	}
 
@@ -290,13 +292,13 @@ func handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 type UptimeResponse struct {
-	ConfigHash    string             `json:"config_hash"`
-	ConfigDate    tlsrouter.JSONTime `json:"config_date"`
-	ConfigVersion string             `json:"config_version"`
-	SystemSeconds float64            `json:"system_seconds"`
-	SystemUptime  string             `json:"system_uptime"`
-	APISeconds    float64            `json:"api_seconds"`
-	APIUptime     string             `json:"api_uptime"`
+	ConfigHash     string             `json:"config_hash"`
+	ConfigDate     tlsrouter.JSONTime `json:"config_date"`
+	ConfigRevision string             `json:"config_version"`
+	SystemSeconds  float64            `json:"system_seconds"`
+	SystemUptime   string             `json:"system_uptime"`
+	APISeconds     float64            `json:"api_seconds"`
+	APIUptime      string             `json:"api_uptime"`
 }
 
 func createHandleStatus(conf tlsrouter.Config, apiStart time.Time) http.HandlerFunc {
@@ -308,13 +310,13 @@ func createHandleStatus(conf tlsrouter.Config, apiStart time.Time) http.HandlerF
 		apiSecs, _ := strconv.ParseFloat(fmt.Sprintf("%.3f", apiUptime.Seconds()), 64)
 
 		response := UptimeResponse{
-			ConfigVersion: conf.Version,
-			ConfigDate:    tlsrouter.JSONTime(conf.FileTime),
-			ConfigHash:    hash,
-			SystemSeconds: sysSecs,
-			SystemUptime:  formatDuration(systemUptime),
-			APISeconds:    apiSecs,
-			APIUptime:     formatDuration(apiUptime),
+			ConfigRevision: conf.Revision,
+			ConfigDate:     tlsrouter.JSONTime(conf.FileTime),
+			ConfigHash:     hash,
+			SystemSeconds:  sysSecs,
+			SystemUptime:   formatDuration(systemUptime),
+			APISeconds:     apiSecs,
+			APIUptime:      formatDuration(apiUptime),
 		}
 
 		data, _ := json.MarshalIndent(response, "", "   ")
