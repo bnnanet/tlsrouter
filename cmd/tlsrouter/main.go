@@ -18,6 +18,7 @@ import (
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
 	"github.com/bnnanet/tlsrouter/net/tun"
+	"github.com/bnnanet/tlsrouter/tabvault"
 
 	"github.com/joho/godotenv"
 )
@@ -97,6 +98,14 @@ func main() {
 	confPath := defaultConfPath
 	mainFlags.StringVar(&confPath, "config", defaultConfPath, "Path to JSON config file")
 
+	defaultVaultPath := "secrets.tsv"
+	// Check BIND environment variable, override default if set
+	if envVaultPath := os.Getenv("VAULT_FILE"); envVaultPath != "" {
+		defaultVaultPath = envVaultPath
+	}
+	vaultPath := defaultVaultPath
+	mainFlags.StringVar(&vaultPath, "vault", defaultVaultPath, "Path to vault TSV (Tab CSV) file")
+
 	mainFlags.Usage = func() {
 		printVersion()
 		fmt.Fprintf(os.Stderr, "\n")
@@ -142,10 +151,15 @@ func main() {
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", bind, port)
 
-	conf, err := ReadConfig(confPath)
+	tabVault, err := tabvault.OpenOrCreate(vaultPath)
+	if err != nil {
+		log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
+	}
+	conf, err := ReadConfig(confPath, tabVault)
 	if err != nil {
 		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 	}
+
 	conf.Handler = http.NewServeMux()
 	setupRouter(conf)
 	lc := tlsrouter.NewListenConfig(conf)
@@ -161,7 +175,11 @@ func main() {
 		case syscall.SIGUSR1:
 			log.Println("Received SIGUSR1, reloading config")
 
-			conf, err := ReadConfig(confPath)
+			tabVault, err := tabvault.OpenOrCreate(vaultPath)
+			if err != nil {
+				log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
+			}
+			conf, err := ReadConfig(confPath, tabVault)
 			if err != nil {
 				log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 			}
@@ -205,7 +223,7 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
-func ReadConfig(filePath string) (conf tlsrouter.Config, err error) {
+func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Config, err error) {
 	// Read the file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -215,6 +233,7 @@ func ReadConfig(filePath string) (conf tlsrouter.Config, err error) {
 	if err := json.Unmarshal(data, &conf); err != nil {
 		return conf, fmt.Errorf("failed to parse config JSON: %w", err)
 	}
+	conf.TabVault = tabVault
 
 	customAlpns := []string{"ssh"}
 	alpns := ianaalpn.Names
