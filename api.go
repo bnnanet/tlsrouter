@@ -50,6 +50,30 @@ func (i *Int52Time) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// JSONTime is a newtype for int64 that marshals/unmarshals a UnixMilli() as ISO Time in JSON.
+type JSONTime time.Time
+
+// MarshalJSON implements json.Marshaler.
+func (t JSONTime) MarshalJSON() ([]byte, error) {
+	then := time.Time(t)
+	isoTime := then.Format("2006-01-02T15:04:05.000-07:00")
+	return json.Marshal(isoTime)
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (t *JSONTime) UnmarshalJSON(data []byte) error {
+	var isoTime string
+	if err := json.Unmarshal(data, &isoTime); err != nil {
+		return err
+	}
+	then, err := time.Parse(time.RFC3339, isoTime)
+	if err != nil {
+		return err
+	}
+	*t = JSONTime(then)
+	return nil
+}
+
 type PConn struct {
 	Self         bool      `json:"self,omitempty"`
 	Address      string    `json:"address"`
@@ -57,7 +81,7 @@ type PConn struct {
 	ALPN         string    `json:"alpn"`
 	Read         Int52     `json:"read"`
 	Written      Int52     `json:"written"`
-	Since        time.Time `json:"since"`
+	Since        JSONTime  `json:"since"`
 	PlainRead    Int52     `json:"plain_read"`
 	PlainWritten Int52     `json:"plain_written"`
 	LastRead     Int52Time `json:"last_read"`
@@ -73,7 +97,7 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 		Written:    Int52(wconn.BytesWritten.Load()),
 		LastRead:   Int52Time(wconn.LastRead.Load()),
 		LastWrite:  Int52Time(wconn.LastWrite.Load()),
-		Since:      wconn.Connected,
+		Since:      JSONTime(wconn.Connected),
 	}
 	if wconn.PlainConn != nil {
 		tlsState := wconn.PlainConn.ConnectionState()

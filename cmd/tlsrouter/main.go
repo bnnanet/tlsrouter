@@ -147,7 +147,7 @@ func main() {
 		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 	}
 	conf.Handler = http.NewServeMux()
-	setupRouter(conf.Handler)
+	setupRouter(conf)
 	lc := tlsrouter.NewListenConfig(conf)
 	_ = Start(&wg, lc, addr)
 
@@ -166,7 +166,7 @@ func main() {
 				log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 			}
 			conf.Handler = http.NewServeMux()
-			setupRouter(conf.Handler)
+			setupRouter(conf)
 			lc2 := tlsrouter.NewListenConfig(conf)
 			_ = Start(&wg, lc2, addr)
 
@@ -240,12 +240,19 @@ func ReadConfig(filePath string) (conf tlsrouter.Config, err error) {
 		}
 	}
 
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return conf, fmt.Errorf("config file disappeared %s: %w", filePath, err)
+	}
+	conf.FileTime = info.ModTime()
+
 	return conf, nil
 }
 
-func setupRouter(mux *http.ServeMux) {
-	handleStatus := createHandleStatus(time.Now())
+func setupRouter(conf tlsrouter.Config) {
+	handleStatus := createHandleStatus(conf, time.Now())
 
+	mux := conf.Handler
 	mux.HandleFunc("GET /version", handleVersion)
 	mux.HandleFunc("GET /api/version", handleVersion)
 	mux.HandleFunc("GET /api/public/version", handleVersion)
@@ -263,18 +270,36 @@ func handleVersion(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func createHandleStatus(apiStart time.Time) http.HandlerFunc {
+type UptimeResponse struct {
+	ConfigHash    string             `json:"config_hash"`
+	ConfigDate    tlsrouter.JSONTime `json:"config_date"`
+	ConfigVersion string             `json:"config_version"`
+	SystemSeconds float64            `json:"system_seconds"`
+	SystemUptime  string             `json:"system_uptime"`
+	APISeconds    float64            `json:"api_seconds"`
+	APIUptime     string             `json:"api_uptime"`
+}
+
+func createHandleStatus(conf tlsrouter.Config, apiStart time.Time) http.HandlerFunc {
+	hash := conf.ShortSHA2()
 	return func(w http.ResponseWriter, r *http.Request) {
 		systemUptime := time.Since(serverStart)
+		sysSecs, _ := strconv.ParseFloat(fmt.Sprintf("%.3f", systemUptime.Seconds()), 64)
 		apiUptime := time.Since(apiStart)
-		_, _ = fmt.Fprintf(
-			w,
-			"{\n   \"system_seconds\": %.2f,\n   \"system_uptime\": %q,"+
-				"\n   \"api_seconds\": %.2f,\n   \"api_uptime\": %q"+
-				"\n}\n",
-			systemUptime.Seconds(), formatDuration(systemUptime),
-			apiUptime.Seconds(), formatDuration(apiUptime),
-		)
+		apiSecs, _ := strconv.ParseFloat(fmt.Sprintf("%.3f", apiUptime.Seconds()), 64)
+
+		response := UptimeResponse{
+			ConfigVersion: conf.Version,
+			ConfigDate:    tlsrouter.JSONTime(conf.FileTime),
+			ConfigHash:    hash,
+			SystemSeconds: sysSecs,
+			SystemUptime:  formatDuration(systemUptime),
+			APISeconds:    apiSecs,
+			APIUptime:     formatDuration(apiUptime),
+		}
+
+		data, _ := json.MarshalIndent(response, "", "   ")
+		_, _ = fmt.Fprintf(w, "%s\n", data)
 	}
 }
 
