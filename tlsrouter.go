@@ -58,11 +58,13 @@ type Config struct {
 }
 
 func (c Config) ShortSHA2() string {
+	c.Version = ""
 	c.Hash = ""
 	b, _ := json.Marshal(c)
 	h := sha256.Sum256(b)
-	c.Hash = "h" + hex.EncodeToString(h[:4])[:7]
-	return c.Hash
+	hash := "h" + hex.EncodeToString(h[:4])[:7]
+
+	return hash
 }
 
 // TLSMatch defines a rule for matching domains and ALPNs to backends.
