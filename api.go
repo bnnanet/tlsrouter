@@ -109,6 +109,14 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 	return pconn
 }
 
+func (lc *ListenConfig) GetConfig(w http.ResponseWriter, r *http.Request) {
+	_ = lc.config.ShortSHA2() // ensure current hash will be present
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(lc.config)
+}
+
 func (lc *ListenConfig) ListConnections(w http.ResponseWriter, r *http.Request) {
 	list := []PConn{}
 
