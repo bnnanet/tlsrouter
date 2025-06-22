@@ -2,7 +2,10 @@ package tlsrouter
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,9 +39,13 @@ func (e ErrorNoTLSConfig) Error() string {
 }
 
 // Config holds the TLS routing configuration and hostname resolutions.
+// Note: JSON keys are encoded in a consistent order, as per struct-order,
+// and generic map keys are sorted.
 type Config struct {
 	Handler               *http.ServeMux    `json:"-"`
 	ACMEDirectoryEndpoint string            `json:"-"`
+	FileTime              time.Time         `json:"-"` // from file date
+	Version               string            `json:"version"`
 	AdminMatch            *TLSMatch         `json:"admin"`
 	TLSMatches            []*TLSMatch       `json:"tls_matches"`
 	ACMEConfigs           []*ACMEConfig     `json:"acme,omitempty"`
@@ -46,15 +53,21 @@ type Config struct {
 	HostnameOverrides     map[string]string `json:"hostname_overrides"`
 }
 
+func (c Config) ShortSHA2() string {
+	b, _ := json.Marshal(c)
+	h := sha256.Sum256(b)
+	return "h" + hex.EncodeToString(h[:4])[:7]
+}
+
 // TLSMatch defines a rule for matching domains and ALPNs to backends.
 type TLSMatch struct {
-	Domains []string `json:"domains"`
-	ALPNs   []string `json:"alpns"`
-	// ALPNBackends map[string][]*Backend `json:"-"`
-	CurrentBackend *atomic.Uint32
-	Backends       []*Backend `json:"backends"`             // Standardizing on "backends"
-	ACME           *struct{}  `json:"acme,omitempty"`       // TODO
-	TLSConfig      *struct{}  `json:"tls_config,omitempty"` // TODO
+	Domains        []string       `json:"domains"`
+	ALPNs          []string       `json:"alpns"`
+	CurrentBackend *atomic.Uint32 `json:"-"`
+	Backends       []*Backend     `json:"backends"`             // Standardizing on "backends"
+	ACME           *struct{}      `json:"acme,omitempty"`       // TODO
+	TLSConfig      *struct{}      `json:"tls_config,omitempty"` // TODO
+	// ALPNBackends   map[string][]*Backend `json:"-"`
 }
 
 type ACMEConfig struct {
