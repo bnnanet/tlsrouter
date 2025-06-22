@@ -110,7 +110,7 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 }
 
 func (lc *ListenConfig) GetConfig(w http.ResponseWriter, r *http.Request) {
-	_ = lc.config.ShortSHA2() // ensure current hash will be present
+	lc.config.Hash = lc.config.ShortSHA2()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
