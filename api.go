@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -111,7 +112,10 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 }
 
 func (lc *ListenConfig) GetConfig(w http.ResponseWriter, r *http.Request) {
-	conf := lc.config.Load().(Config)
+	lc.newMu.Lock()
+	defer lc.newMu.Unlock()
+
+	conf := lc.LoadConfig()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -119,6 +123,9 @@ func (lc *ListenConfig) GetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (lc *ListenConfig) GetNewConfig(w http.ResponseWriter, r *http.Request) {
+	lc.newMu.Lock()
+	defer lc.newMu.Unlock()
+
 	newConf := lc.newConfig.Load()
 	if newConf == nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -127,18 +134,85 @@ func (lc *ListenConfig) GetNewConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newConf.Hash = newConf.ShortSHA2()
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(newConf)
 
 }
 
+type ConfigConflict struct {
+	Hash     string `json:"hash"`
+	Revision string `json:"rev"`
+}
+
+type ConfigError struct {
+	Error string `json:"error"`
+}
+
 func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
+	lc.newMu.Lock()
+	defer lc.newMu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
+
+	newConf := lc.newConfig.Load()
+	if newConf == nil {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(nil)
+		return
+	}
+
+	hashOrRev := r.PathValue("HashOrRev")
+	if newConf.Hash != hashOrRev && newConf.Revision != hashOrRev {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(&ConfigConflict{
+			Hash:     newConf.Hash,
+			Revision: newConf.Revision,
+		})
+		return
+	}
+
+	oldConf := lc.LoadConfig()
+	if oldConf.Hash == newConf.Hash {
+		w.WriteHeader(http.StatusNotModified)
+		_ = json.NewEncoder(w).Encode(nil)
+		return
+	}
+
+	rev, err := strconv.Atoi(oldConf.Revision)
+	if err == nil {
+		rev++
+		newConf.Revision = strconv.Itoa(rev)
+	}
+
+	newConf.FilePath = oldConf.FilePath
+	if err := newConf.Save(); err != nil {
+		// TODO panic
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(ConfigError{
+			Error: "failed to save config",
+		})
+		return
+	}
+	info, err := os.Stat(newConf.FilePath)
+	if err != nil {
+		// TODO panic
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(ConfigError{
+			Error: "config file disappeared",
+		})
+		return
+	}
+	newConf.FileTime = info.ModTime()
+
+	// TODO XXXX TODO
+	// actually we need to regen and replace all the config stuff
+	// (because we don't have idle detection for ssh, postgresql, smb, etc
+	// and using the old config will eventually lead to strange bad gateway errors)
+	oldConf.Reincarnate()
+
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(nil)
+	_ = json.NewEncoder(w).Encode(&oldConf)
 }
 
 // APIService defines a rule for matching domains and ALPNs to backends.
@@ -153,7 +227,14 @@ type APIService struct {
 }
 
 func (lc *ListenConfig) ListServices(w http.ResponseWriter, r *http.Request) {
-	conf := lc.LoadConfig()
+	lc.newMu.Lock()
+	defer lc.newMu.Unlock()
+
+	newConf := lc.newConfig.Load()
+	if newConf == nil {
+		conf := lc.LoadConfig()
+		newConf = &conf
+	}
 	services := []APIService{}
 
 	var domains []string
@@ -180,7 +261,7 @@ func (lc *ListenConfig) ListServices(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for _, app := range conf.Apps {
+	for _, app := range newConf.Apps {
 		for _, srv := range app.Services {
 			var backendSlugs []string
 			for _, be := range srv.Backends {
@@ -251,16 +332,20 @@ func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
 	lc.newMu.Lock()
 	defer lc.newMu.Unlock()
 
-	newConfig := lc.newConfig.Load()
-	if newConfig == nil {
-		newConfigVal := lc.LoadConfig()
-		newConfig = &newConfigVal
+	newConf := lc.newConfig.Load()
+	if newConf == nil {
+		newConfVal := lc.LoadConfig()
+		newConf = &newConfVal
 	}
-	lc.newConfig.Store(newConfig)
+
+	// TODO update config
+
+	newConf.Hash = newConf.ShortSHA2()
+	lc.newConfig.Store(newConf)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(newConfig)
+	_ = json.NewEncoder(w).Encode(newConf)
 }
 
 func (lc *ListenConfig) ListConnections(w http.ResponseWriter, r *http.Request) {
@@ -318,17 +403,32 @@ func (lc *ListenConfig) CloseRemotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (lc *ListenConfig) CloseClients(w http.ResponseWriter, r *http.Request) {
+	snialpn := r.PathValue("Service")
+	fmt.Println("SNIALPN Query", snialpn)
+	list, selfToClose := lc.closeClients(snialpn, r.RemoteAddr)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(list)
+
+	go func() {
+		time.Sleep(1 * time.Millisecond)
+		if selfToClose != nil {
+			_ = selfToClose.Close()
+		}
+	}()
+}
+
+func (lc *ListenConfig) closeClients(snialpn string, remoteAddr string) ([]PConn, *wrappedConn) {
 	var selfToClose *wrappedConn
 	list := []PConn{}
 
-	snialpn := r.PathValue("Service")
-	fmt.Println("SNIALPN Query", snialpn)
 	lc.Conns.Range(func(_, v any) bool {
 		wconn := v.(*wrappedConn)
 		fmt.Println("SNIALPN", wconn.SNIALPN.SNI())
 		if snialpn == wconn.SNIALPN.SNI() || snialpn == string(wconn.SNIALPN) {
 			pconn := WConnToPConn(wconn)
-			if pconn.Address == r.RemoteAddr {
+			if pconn.Address == remoteAddr {
 				pconn.Self = true
 				selfToClose = wconn
 			} else {
@@ -342,14 +442,5 @@ func (lc *ListenConfig) CloseClients(w http.ResponseWriter, r *http.Request) {
 		return true
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(list)
-
-	go func() {
-		time.Sleep(1 * time.Millisecond)
-		if selfToClose != nil {
-			_ = selfToClose.Close()
-		}
-	}()
+	return list, selfToClose
 }

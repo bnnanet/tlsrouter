@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,7 +20,6 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
-	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
 	"github.com/joho/godotenv"
@@ -148,6 +150,10 @@ func main() {
 		return
 	}
 
+	// Signal handling (must be have a buffer of at least 1)
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
+
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", bind, port)
 
@@ -161,52 +167,55 @@ func main() {
 	}
 
 	conf.Handler = http.NewServeMux()
+	conf.SetSigChan(sigChan)
 	setupRouter(conf)
 	lc := tlsrouter.NewListenConfig(conf)
 	_ = Start(&wg, lc, addr)
 
-	// Signal handling (must be have a buffer of at least 1)
-	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		for {
+			sig := <-sigChan
+			switch sig {
+			case syscall.SIGUSR1:
+				log.Println("Received SIGUSR1, reloading config")
 
-	for {
-		sig := <-sigChan
-		switch sig {
-		case syscall.SIGUSR1:
-			log.Println("Received SIGUSR1, reloading config")
+				// TODO kill connections to management
+				tabVault, err := tabvault.OpenOrCreate(vaultPath)
+				if err != nil {
+					log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
+				}
+				conf, err := ReadConfig(confPath, tabVault)
+				if err != nil {
+					log.Fatalf("Config Error: %q\n%s\n", confPath, err)
+				}
+				conf.Handler = http.NewServeMux()
+				conf.SetSigChan(sigChan)
+				setupRouter(conf)
+				lc2 := tlsrouter.NewListenConfig(conf)
+				_ = Start(&wg, lc2, addr)
 
-			tabVault, err := tabvault.OpenOrCreate(vaultPath)
-			if err != nil {
-				log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
+				// Gracefully shutdown old server
+				go lc.Shutdown(context.Background())
+
+				// Update server reference
+				lc = lc2
+			case syscall.SIGINT:
+				log.Println("Received SIGINT, shutting down (5s)")
+				lc.Shutdown(context.Background())
+				time.Sleep(5 * time.Second)
+				os.Exit(1)
+			case syscall.SIGTERM:
+				log.Println("Received SIGTERM, shutting down (5s)")
+				lc.Shutdown(context.Background())
+				time.Sleep(5 * time.Second)
+				os.Exit(1)
+			default:
+				log.Printf("Received unhandled signal %s", sig)
 			}
-			conf, err := ReadConfig(confPath, tabVault)
-			if err != nil {
-				log.Fatalf("Config Error: %q\n%s\n", confPath, err)
-			}
-			conf.Handler = http.NewServeMux()
-			setupRouter(conf)
-			lc2 := tlsrouter.NewListenConfig(conf)
-			_ = Start(&wg, lc2, addr)
-
-			// Gracefully shutdown old server
-			go lc.Shutdown()
-
-			// Update server reference
-			lc = lc2
-		case syscall.SIGINT:
-			log.Println("Received SIGINT, shutting down (5s)")
-			lc.Shutdown()
-			time.Sleep(5 * time.Second)
-			os.Exit(1)
-		case syscall.SIGTERM:
-			log.Println("Received SIGTERM, shutting down (5s)")
-			lc.Shutdown()
-			time.Sleep(5 * time.Second)
-			os.Exit(1)
-		default:
-			log.Printf("Received unhandled signal %s", sig)
 		}
-	}
+	}()
+
+	wg.Wait()
 }
 
 func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
@@ -215,16 +224,19 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
 		defer wg.Done()
 
 		log.Printf("\nListening on %s...", addr)
-		if err := lc.ListenAndProxy(addr); err != nil && err != tun.ErrListenerClosed {
+		if err := lc.ListenAndProxy(addr); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Printf("Server error: %v", err)
 		}
+		log.Printf("Closed\n")
 	}()
 	return nil
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
 func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Config, err error) {
-	// Read the file
+	conf.FilePath = filePath
+	conf.TabVault = tabVault
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return conf, fmt.Errorf("failed to read config file %s: %w", filePath, err)
@@ -233,7 +245,6 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 	if err := json.Unmarshal(data, &conf); err != nil {
 		return conf, fmt.Errorf("failed to parse config JSON: %w", err)
 	}
-	conf.TabVault = tabVault
 
 	customAlpns := []string{"ssh"}
 	knownAlpns := ianaalpn.Names
@@ -267,6 +278,7 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 	}
 	conf.FileTime = info.ModTime()
 
+	conf.Hash = conf.ShortSHA2()
 	return conf, nil
 }
 
@@ -302,7 +314,6 @@ type UptimeResponse struct {
 }
 
 func createHandleStatus(conf tlsrouter.Config, apiStart time.Time) http.HandlerFunc {
-	hash := conf.ShortSHA2()
 	return func(w http.ResponseWriter, r *http.Request) {
 		systemUptime := time.Since(serverStart)
 		sysSecs, _ := strconv.ParseFloat(fmt.Sprintf("%.3f", systemUptime.Seconds()), 64)
@@ -312,7 +323,7 @@ func createHandleStatus(conf tlsrouter.Config, apiStart time.Time) http.HandlerF
 		response := UptimeResponse{
 			ConfigRevision: conf.Revision,
 			ConfigDate:     tlsrouter.JSONTime(conf.FileTime),
-			ConfigHash:     hash,
+			ConfigHash:     conf.Hash,
 			SystemSeconds:  sysSecs,
 			SystemUptime:   formatDuration(systemUptime),
 			APISeconds:     apiSecs,
