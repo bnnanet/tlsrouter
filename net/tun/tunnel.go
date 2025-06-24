@@ -2,14 +2,14 @@ package tun
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync/atomic"
 )
 
 // ErrListenerClosed is returned when operations are performed on a closed Listener.
-var ErrListenerClosed = errors.New("netproxy: listener closed")
+var ErrListenerClosed = fmt.Errorf("netproxy: listener closed: %w", net.ErrClosed)
 
 type InjectListener interface {
 	Accept() (net.Conn, error)
