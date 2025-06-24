@@ -1,6 +1,7 @@
 package tlsrouter
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -57,21 +58,75 @@ type Config struct {
 	Hash                  string             `json:"hash,omitempty"`
 	Handler               *http.ServeMux     `json:"-"`
 	ACMEDirectoryEndpoint string             `json:"-"`
+	FilePath              string             `json:"-"`
 	FileTime              time.Time          `json:"-"` // from file date
+	sigChan               chan os.Signal     `json:"-"`
 	TabVault              *tabvault.TabVault `json:"-"`
 	AdminDNS              *ConfigDNS         `json:"admin"`
 	Apps                  []*ConfigApp       `json:"apps"`
 	certmagicStorage      certmagic.Storage  `json:"-"`
 }
 
-func (c Config) ShortSHA2() string {
+// ShortSHA2 is not safe for use after atomic Store()
+func (c *Config) ShortSHA2() string {
+	// TODO use mutex to make concurrency-safe
+	rev := c.Revision
 	c.Revision = ""
+	hash := c.Hash
 	c.Hash = ""
-	b, _ := json.Marshal(c)
-	h := sha256.Sum256(b)
-	hash := "h" + hex.EncodeToString(h[:4])[:7]
+	defer func() {
+		c.Revision = rev
+		c.Hash = hash
+	}()
 
-	return hash
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(c)
+	h := sha256.Sum256(buf.Bytes())
+
+	return "h" + hex.EncodeToString(h[:4])[:7]
+}
+
+func (c *Config) SetSigChan(sigChan chan os.Signal) {
+	if c.sigChan != nil {
+		panic("'sigChan' can only be set once")
+	}
+	c.sigChan = sigChan
+}
+
+func (c *Config) Reincarnate() {
+	c.sigChan <- syscall.SIGUSR1
+}
+
+// Save must not be called after the atomic Store()
+func (c *Config) Save() error {
+	hash := c.Hash
+	c.Hash = ""
+	defer func() {
+		c.Hash = hash
+	}()
+
+	file, err := os.OpenFile(c.FilePath, os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+
+	enc := json.NewEncoder(file)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "   ")
+	if err := enc.Encode(c); err != nil {
+		return err
+	}
+
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // ConfigApp describes an arbitrarily relationship between services
@@ -180,14 +235,19 @@ type ListenConfig struct {
 	certmagicConfMap      map[string]*certmagic.Config
 	certmagicCache        *certmagic.Cache
 	certmagicStorage      certmagic.Storage
-	done                  chan struct{}
+	done                  chan context.Context
 	Close                 func()
 	netConf               net.ListenConfig
+	adminServer           *http.Server
+	netLn                 net.Listener
 }
 
 // TODO move to *Listener
-func (lc *ListenConfig) Shutdown() {
-	lc.done <- struct{}{}
+func (lc *ListenConfig) Shutdown(ctx context.Context) {
+	_ = lc.netLn.Close()
+	// TODO create a context with a 5 second timeout and
+	_ = lc.adminServer.Shutdown(ctx)
+	lc.done <- ctx
 }
 
 func NewListenConfig(conf Config) *ListenConfig {
@@ -232,7 +292,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		certmagicConfMap:      certmagicConfMap,
 		certmagicStorage:      certmagicStorage,
 		certmagicCache:        certmagicCache,
-		done:                  make(chan struct{}),
+		done:                  make(chan context.Context),
 		netConf: net.ListenConfig{
 			Control: reusePort,
 		},
@@ -506,6 +566,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 				}
 				proxy.Transport = transport
 
+				// TODO track these for shutdown (to call Shutdown() and Close() on each)
 				proxyServer := &http.Server{
 					Handler: proxy,
 					BaseContext: func(_ net.Listener) context.Context {
@@ -661,7 +722,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 		protocols.SetHTTP2(true)
 		protocols.SetUnencryptedHTTP2(true)
 
-		proxyServer := &http.Server{
+		lc.adminServer = &http.Server{
 			Handler: conf.Handler,
 			BaseContext: func(_ net.Listener) context.Context {
 				return lc.Context
@@ -669,17 +730,18 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 			ConnContext: nil,
 			Protocols:   protocols,
 		}
-		_ = proxyServer.Serve(lc.adminTunnel)
+		_ = lc.adminServer.Serve(lc.adminTunnel)
 	}()
 
-	netLn, err := lc.netConf.Listen(lc.Context, "tcp", addr)
+	var err error
+	lc.netLn, err = lc.netConf.Listen(lc.Context, "tcp", addr)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		for {
-			conn, err := netLn.Accept()
+			conn, err := lc.netLn.Accept()
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
 					break
@@ -701,11 +763,13 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 				// TODO log to error channel
 			}()
 		case <-lc.Context.Done():
-			lc.done <- struct{}{}
+			lc.done <- context.Background()
 		case <-lc.done:
 			fmt.Fprintf(os.Stderr, "\n[[[[debug: stop server]]]]\n\n")
-			_ = netLn.Close()
-			return nil
+			// TODO hard close Conn
+			_ = lc.netLn.Close()
+			_ = lc.adminServer.Close()
+			return net.ErrClosed
 		}
 	}
 }
