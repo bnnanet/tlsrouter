@@ -62,8 +62,8 @@ type Config struct {
 	FileTime              time.Time          `json:"-"` // from file date
 	sigChan               chan os.Signal     `json:"-"`
 	TabVault              *tabvault.TabVault `json:"-"`
-	AdminDNS              *ConfigDNS         `json:"admin"`
-	Apps                  []*ConfigApp       `json:"apps"`
+	AdminDNS              ConfigDNS          `json:"admin"`
+	Apps                  []ConfigApp        `json:"apps"`
 	certmagicStorage      certmagic.Storage  `json:"-"`
 }
 
@@ -131,12 +131,12 @@ func (c *Config) Save() error {
 
 // ConfigApp describes an arbitrarily relationship between services
 type ConfigApp struct {
-	Label        string           `json:"label"`
-	Slug         string           `json:"slug"`
-	Comment      string           `json:"comment,omitempty"`
-	Disabled     bool             `json:"disabled,omitempty"`
-	DNSProviders []*ConfigDNS     `json:"dns_providers,omitempty"`
-	Services     []*ConfigService `json:"services"`
+	Label        string          `json:"label"`
+	Slug         string          `json:"slug"`
+	Comment      string          `json:"comment,omitempty"`
+	Disabled     bool            `json:"disabled,omitempty"`
+	DNSProviders []ConfigDNS     `json:"dns_providers,omitempty"`
+	Services     []ConfigService `json:"services"`
 }
 
 // ConfigService defines a rule for matching domains and ALPNs to backends.
@@ -146,8 +146,24 @@ type ConfigService struct {
 	Disabled       bool           `json:"disabled,omitempty"`
 	Domains        []string       `json:"domains"`
 	ALPNs          []string       `json:"alpns,omitempty"`
-	Backends       []*Backend     `json:"backends"`
+	Backends       []Backend      `json:"backends"`
 	CurrentBackend *atomic.Uint32 `json:"-"`
+}
+
+func (srv *ConfigService) GenSlug() string {
+	alpn := srv.ALPNs[0]
+	if slices.Contains(HTTPFamilyALPNs, alpn) {
+		alpn = "http"
+	}
+	alpn = strings.Split(alpn, "/")[0]
+	domain := strings.ReplaceAll(srv.Domains[0], ".", "-")
+	domain = strings.ReplaceAll(domain, "*", "wild-")
+	if strings.HasPrefix(domain, "-") {
+		domain = "wild-" + domain
+	}
+
+	slug := domain + "-" + alpn
+	return slug
 }
 
 // ConfigDNS defines libdns-style DNS API options
@@ -322,7 +338,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		}
 
 		for _, domain := range conf.AdminDNS.Domains {
-			dnsConfByDomain[domain] = conf.AdminDNS
+			dnsConfByDomain[domain] = &conf.AdminDNS
 		}
 	}
 
@@ -353,7 +369,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 				dnsConf.Domains = []string{"*"}
 			}
 			if wildDNSConf == emptyDNSConf {
-				wildDNSConf = dnsConf
+				wildDNSConf = &dnsConf
 				continue
 			}
 			fmt.Fprintf(
@@ -394,7 +410,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			for _, domain := range dnsConf.Domains {
 				oldDNSConf, exists := dnsConfByDomain[domain]
 				if !exists {
-					dnsConfByDomain[domain] = dnsConf
+					dnsConfByDomain[domain] = &dnsConf
 					continue
 				}
 				if oldDNSConf == emptyDNSConf {
@@ -404,7 +420,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 						domain,
 						dnsConf.Slug,
 					)
-					dnsConfByDomain[domain] = dnsConf
+					dnsConfByDomain[domain] = &dnsConf
 				}
 				if oldDNSConf.API == dnsConf.API &&
 					oldDNSConf.APIToken == dnsConf.APIToken {
@@ -885,7 +901,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 				isRawTCP := b.HTTPTunnel == nil && b.PROXYProto == 0
 				if isRawTCP {
-					backend = b
+					backend = &b
 					break
 				}
 
@@ -896,7 +912,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					return nil, fmt.Errorf("could not connect to backend %q", b.Host)
 				}
 				if beConn != nil {
-					backend = b
+					backend = &b
 					break
 				}
 			}
@@ -1296,18 +1312,8 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*ConfigServ
 			}
 
 			if len(srv.Slug) == 0 {
-				alpn := srv.ALPNs[0]
-				if slices.Contains(HTTPFamilyALPNs, alpn) {
-					alpn = "http"
-				}
-				alpn = strings.Split(alpn, "/")[0]
-				domain := strings.ReplaceAll(srv.Domains[0], ".", "-")
-				domain = strings.ReplaceAll(domain, "*", "wild-")
-				if strings.HasPrefix(domain, "-") {
-					domain = "wild-" + domain
-				}
 				// TODO make sure this doesn't conflict with other slugs
-				srv.Slug = domain + "-" + alpn
+				srv.Slug = srv.GenSlug()
 			}
 
 			for i, be := range srv.Backends {
@@ -1442,7 +1448,7 @@ func LintConfig(conf *Config, allowedAlpns []string) error {
 			}
 
 			if len(srv.Backends) == 0 {
-				return fmt.Errorf("domains+alpns set %q have no 'backends' defined", snialpns)
+				fmt.Fprintf(os.Stderr, "warn: domains+alpns set %q have no 'backends' defined", snialpns)
 			}
 
 			for i, b := range srv.Backends {
