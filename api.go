@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -110,11 +111,156 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 }
 
 func (lc *ListenConfig) GetConfig(w http.ResponseWriter, r *http.Request) {
-	lc.config.Hash = lc.config.ShortSHA2()
+	conf := lc.config.Load().(Config)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(lc.config)
+	_ = json.NewEncoder(w).Encode(conf)
+}
+
+func (lc *ListenConfig) GetNewConfig(w http.ResponseWriter, r *http.Request) {
+	newConf := lc.newConfig.Load()
+	if newConf == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(nil)
+		return
+	}
+
+	newConf.Hash = newConf.ShortSHA2()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(newConf)
+
+}
+
+func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(nil)
+}
+
+// APIService defines a rule for matching domains and ALPNs to backends.
+type APIService struct {
+	AppSlug      string   `json:"app_slug"`
+	Slug         string   `json:"slug"`
+	Comment      string   `json:"comment,omitempty"`
+	Disabled     bool     `json:"disabled,omitempty"`
+	Domains      []string `json:"domains"`
+	ALPNs        []string `json:"alpns"`
+	BackendSlugs []string `json:"backend_slugs,omitempty"`
+}
+
+func (lc *ListenConfig) ListServices(w http.ResponseWriter, r *http.Request) {
+	conf := lc.LoadConfig()
+	services := []APIService{}
+
+	var domains []string
+	domainList := r.URL.Query().Get("domains")
+	domainList = strings.TrimSpace(domainList)
+	if len(domainList) > 0 {
+		domains = strings.FieldsFunc(domainList, func(r rune) bool {
+			return r == ' ' || r == ','
+		})
+		for i, domain := range domains {
+			domains[i] = strings.TrimSpace(domain)
+		}
+	}
+
+	var alpns []string
+	alpnList := r.URL.Query().Get("alpns")
+	alpnList = strings.TrimSpace(alpnList)
+	if len(alpnList) > 0 {
+		alpns = strings.FieldsFunc(alpnList, func(r rune) bool {
+			return r == ' ' || r == ','
+		})
+		for i, alpn := range alpns {
+			alpns[i] = strings.TrimSpace(alpn)
+		}
+	}
+
+	for _, app := range conf.Apps {
+		for _, srv := range app.Services {
+			var backendSlugs []string
+			for _, be := range srv.Backends {
+				backendSlugs = append(backendSlugs, be.Slug)
+			}
+			service := APIService{
+				AppSlug:      app.Slug,
+				Slug:         srv.Slug,
+				Comment:      srv.Comment,
+				Disabled:     srv.Disabled,
+				Domains:      srv.Domains,
+				ALPNs:        srv.ALPNs,
+				BackendSlugs: backendSlugs,
+			}
+
+			var keepByDomain bool
+			if len(domains) == 0 {
+				keepByDomain = true
+			}
+			for _, domain := range domains {
+				for _, d := range srv.Domains {
+					if strings.HasPrefix(domain, ".") && strings.HasSuffix(d, domain) {
+						keepByDomain = true
+						break
+					}
+					if slices.Contains(srv.Domains, domain) {
+						keepByDomain = true
+						break
+					}
+				}
+				if keepByDomain {
+					break
+				}
+			}
+
+			var keepByALPN bool
+			if len(alpns) == 0 {
+				keepByALPN = true
+			}
+			for _, alpn := range alpns {
+				for _, p := range srv.ALPNs {
+					if strings.HasPrefix(alpn, ".") && strings.HasSuffix(p, alpn) {
+						keepByALPN = true
+						break
+					}
+					if slices.Contains(srv.ALPNs, alpn) {
+						keepByALPN = true
+						break
+					}
+				}
+				if keepByALPN {
+					break
+				}
+			}
+
+			if keepByDomain && keepByALPN {
+				services = append(services, service)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(services)
+}
+
+func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
+	lc.newMu.Lock()
+	defer lc.newMu.Unlock()
+
+	newConfig := lc.newConfig.Load()
+	if newConfig == nil {
+		newConfigVal := lc.LoadConfig()
+		newConfig = &newConfigVal
+	}
+	lc.newConfig.Store(newConfig)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(newConfig)
 }
 
 func (lc *ListenConfig) ListConnections(w http.ResponseWriter, r *http.Request) {

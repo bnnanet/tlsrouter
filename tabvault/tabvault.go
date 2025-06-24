@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -80,6 +81,18 @@ func OpenOrCreate(filepath string) (*TabVault, error) {
 		v.hashes[hashSecret(secret)] = id
 	}
 	return v, nil
+}
+
+func (v *TabVault) ToVaultURI(s string) (string, error) {
+	if strings.HasPrefix(s, "vault://") {
+		return s, nil
+	}
+
+	id, err := v.Add(s)
+	if err != nil {
+		return "", err
+	}
+	return "vault://" + id, nil
 }
 
 func (v *TabVault) Add(secret string) (string, error) {

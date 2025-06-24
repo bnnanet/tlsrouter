@@ -236,20 +236,20 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 	conf.TabVault = tabVault
 
 	customAlpns := []string{"ssh"}
-	alpns := ianaalpn.Names
+	knownAlpns := ianaalpn.Names
 
 	for _, alpn := range customAlpns {
-		if !slices.Contains(alpns, alpn) {
-			alpns = append(alpns, alpn)
+		if !slices.Contains(knownAlpns, alpn) {
+			knownAlpns = append(knownAlpns, alpn)
 		}
 	}
 
-	if err := tlsrouter.LintConfig(conf, alpns); nil != err {
+	if err := tlsrouter.LintConfig(&conf, knownAlpns); nil != err {
 		return conf, err
 	}
 
 	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(conf)
-	_, _ = tlsrouter.NormalizeConfig(conf)
+	_, _ = tlsrouter.NormalizeConfig(&conf)
 
 	for _, app := range conf.Apps {
 		for _, srv := range app.Services {

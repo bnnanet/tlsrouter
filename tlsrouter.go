@@ -34,6 +34,15 @@ import (
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
 
+var HTTPFamilyALPNs = []string{
+	"h3",
+	"h2",
+	"h2c",
+	"http/0.9",
+	"http/1.0",
+	"http/1.1",
+}
+
 type ErrorNoTLSConfig string
 
 func (e ErrorNoTLSConfig) Error() string {
@@ -81,7 +90,7 @@ type ConfigService struct {
 	Comment        string         `json:"comment,omitempty"`
 	Disabled       bool           `json:"disabled,omitempty"`
 	Domains        []string       `json:"domains"`
-	ALPNs          []string       `json:"alpns"`
+	ALPNs          []string       `json:"alpns,omitempty"`
 	Backends       []*Backend     `json:"backends"`
 	CurrentBackend *atomic.Uint32 `json:"-"`
 }
@@ -91,8 +100,8 @@ type ConfigDNS struct {
 	Slug     string   `json:"slug"`
 	Comment  string   `json:"comment,omitempty"`
 	Disabled bool     `json:"disabled,omitempty"`
-	Domains  []string `json:"domains"`
-	XDomains []string `json:"excluded_domains"`
+	Domains  []string `json:"domains,omitempty"`
+	XDomains []string `json:"excluded_domains,omitempty"`
 	API      string   `json:"api"`
 	APIToken string   `json:"api_token"`
 }
@@ -113,7 +122,7 @@ type Backend struct {
 	Slug            string             `json:"slug"`
 	Comment         string             `json:"comment,omitempty"`
 	Disabled        bool               `json:"disabled,omitempty"`
-	ALPNs           []string           `json:"alpns"`
+	ALPNs           []string           `json:"alpns,omitempty"`
 	Address         string             `json:"address"`
 	Port            uint16             `json:"port"`
 	Host            string             `json:"-"`
@@ -156,7 +165,9 @@ func (s SNIALPN) SNI() string {
 // type Matchers map[string]ConfigService
 
 type ListenConfig struct {
-	config                Config
+	config                atomic.Value
+	newConfig             atomic.Pointer[Config]
+	newMu                 sync.Mutex
 	adminTunnel           tun.InjectListener
 	Conns                 sync.Map
 	TLSMismatches         sync.Map
@@ -180,7 +191,7 @@ func (lc *ListenConfig) Shutdown() {
 }
 
 func NewListenConfig(conf Config) *ListenConfig {
-	domainMatchers, snialpnMatchers := NormalizeConfig(conf)
+	domainMatchers, snialpnMatchers := NormalizeConfig(&conf)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -211,7 +222,6 @@ func NewListenConfig(conf Config) *ListenConfig {
 		adminTunnel:           tun.NewListener(ctx),
 		Conns:                 sync.Map{},
 		TLSMismatches:         sync.Map{},
-		config:                conf,
 		alpnsByDomain:         domainMatchers,
 		configBySNIALPN:       snialpnMatchers,
 		Context:               ctx,
@@ -245,6 +255,12 @@ func NewListenConfig(conf Config) *ListenConfig {
 			strings.Join(conf.AdminDNS.Domains, ", "),
 		)
 	} else {
+		var err error
+		conf.AdminDNS.APIToken, err = conf.TabVault.ToVaultURI(conf.AdminDNS.APIToken)
+		if err != nil {
+			panic("TabVault could not be written to")
+		}
+
 		for _, domain := range conf.AdminDNS.Domains {
 			dnsConfByDomain[domain] = conf.AdminDNS
 		}
@@ -363,7 +379,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			apiToken := dnsConf.APIToken
 			if strings.HasPrefix(apiToken, "vault://") {
 				id := strings.TrimPrefix(apiToken, "vault://")
-				apiToken = lc.config.TabVault.Get(id)
+				apiToken = conf.TabVault.Get(id)
 			}
 			issuerConfMap[domain] = &ACMEDNS{
 				DNSProvider: &duckdns.Provider{
@@ -505,7 +521,17 @@ func NewListenConfig(conf Config) *ListenConfig {
 		}
 	}
 
+	// Now we must never modify conf again!!
+	lc.StoreConfig(conf)
 	return lc
+}
+
+func (lc *ListenConfig) StoreConfig(conf Config) {
+	lc.config.Store(conf)
+}
+
+func (lc *ListenConfig) LoadConfig() Config {
+	return lc.config.Load().(Config)
 }
 
 func (lc *ListenConfig) newCertmagicTLSALPNOnly() *certmagic.Config {
@@ -619,17 +645,15 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	ch := make(chan net.Conn)
 
-	lc.config.Handler.HandleFunc("GET /api/config", lc.GetConfig)
-	// lc.config.Handler.HandleFunc("POST /api/apps", lc.AddApp)
-	// lc.config.Handler.HandleFunc("PATCH /api/apps/{App}/services/{Srv}/domains", lc.AddOrReplaceDomain)
-	// lc.config.Handler.HandleFunc("PUT /api/apps/{App}/dns_providers", lc.SetDNSProvider)
-	// lc.config.Handler.HandleFunc("PUT /api/apps/{App}/backends/{Addr}", lc.AddOrReplaceBackend)
-	// lc.config.Handler.HandleFunc("DELETE /api/apps/{App}/backends/{Addr}", lc.AddOrReplaceBackend)
-	// lc.config.Handler.HandleFunc("POST /api/apps/{App}/services", lc.AddService)
-	// lc.config.Handler.HandleFunc("PUT /api/config/{AppSlug}/services/{ServiceSlug}", lc.SetService)
-	lc.config.Handler.HandleFunc("GET /api/connections", lc.ListConnections)
-	lc.config.Handler.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.CloseRemotes)
-	lc.config.Handler.HandleFunc("DELETE /api/clients/{Service}", lc.CloseClients)
+	conf := lc.LoadConfig()
+	conf.Handler.HandleFunc("GET /api/config/current", lc.GetConfig)
+	conf.Handler.HandleFunc("GET /api/config/new", lc.GetNewConfig)
+	conf.Handler.HandleFunc("PUT /api/config/new/{HashOrRev}", lc.SetNewConfig)
+	conf.Handler.HandleFunc("GET /api/services", lc.ListServices)
+	conf.Handler.HandleFunc("POST /api/services", lc.SetService)
+	conf.Handler.HandleFunc("GET /api/connections", lc.ListConnections)
+	conf.Handler.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.CloseRemotes)
+	conf.Handler.HandleFunc("DELETE /api/clients/{Service}", lc.CloseClients)
 
 	go func() {
 		protocols := &http.Protocols{}
@@ -638,7 +662,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 		protocols.SetUnencryptedHTTP2(true)
 
 		proxyServer := &http.Server{
-			Handler: lc.config.Handler,
+			Handler: conf.Handler,
 			BaseContext: func(_ net.Listener) context.Context {
 				return lc.Context
 			},
@@ -701,6 +725,8 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	// tlsConn.NetConn()
 	tlsConn := tls.Server(wconn, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			conf := lc.LoadConfig()
+
 			fmt.Fprintf(os.Stderr, "ServerName (SNI): %s\n", hello.ServerName)
 			fmt.Fprintf(os.Stderr, "SupportedProtos (ALPN): %s\n", hello.SupportedProtos)
 
@@ -741,7 +767,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					var err error
 					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
 					if err != nil {
-						if !slices.Contains(lc.config.AdminDNS.Domains, domain) {
+						if !slices.Contains(conf.AdminDNS.Domains, domain) {
 							trackMismatch()
 							snialpn = ""
 							return nil, err
@@ -1185,15 +1211,50 @@ func (tc *PlainConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*ConfigService) {
+func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*ConfigService) {
 	domainALPNMatchers := map[string][]string{}
 	snialpnMatchers := map[SNIALPN]*ConfigService{}
 
-	for _, app := range conf.Apps {
-		for _, srv := range app.Services {
+	for i, app := range conf.Apps {
+		for i, srv := range app.Services {
 			if len(srv.Backends) == 0 {
-				fmt.Println("debug: warn: empty backends")
+				fmt.Println("debug: warn: service has no backends")
 				continue
+			}
+
+			if len(srv.Domains) == 0 {
+				fmt.Println("debug: warn: service has no domains")
+				continue
+			}
+
+			if len(srv.ALPNs) == 0 {
+				srv.ALPNs = append(srv.ALPNs, "http/1.1")
+			}
+
+			if len(srv.Slug) == 0 {
+				alpn := srv.ALPNs[0]
+				if slices.Contains(HTTPFamilyALPNs, alpn) {
+					alpn = "http"
+				}
+				alpn = strings.Split(alpn, "/")[0]
+				domain := strings.ReplaceAll(srv.Domains[0], ".", "-")
+				domain = strings.ReplaceAll(domain, "*", "wild-")
+				if strings.HasPrefix(domain, "-") {
+					domain = "wild-" + domain
+				}
+				// TODO make sure this doesn't conflict with other slugs
+				srv.Slug = domain + "-" + alpn
+			}
+
+			for i, be := range srv.Backends {
+				if len(be.Slug) == 0 {
+					addr := strings.ReplaceAll(be.Address, ".", "-")
+					addr = strings.ReplaceAll(addr, ":", "-")
+					addr = strings.ReplaceAll(addr, "--", "-")
+					// TODO make sure this doesn't conflict with other slugs
+					be.Slug = addr + "--" + fmt.Sprintf("%d", be.Port)
+				}
+				srv.Backends[i] = be
 			}
 
 			for _, domain := range srv.Domains {
@@ -1227,6 +1288,7 @@ func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*ConfigServi
 					}
 				}
 			}
+			app.Services[i] = srv
 		}
 
 		for i, dnsConf := range app.DNSProviders {
@@ -1234,25 +1296,22 @@ func NormalizeConfig(conf Config) (map[string][]string, map[SNIALPN]*ConfigServi
 				continue
 			}
 
-			if strings.HasPrefix(dnsConf.APIToken, "vault://") {
-				continue
-			}
-
-			id, err := conf.TabVault.Add(dnsConf.APIToken)
+			var err error
+			dnsConf.APIToken, err = conf.TabVault.ToVaultURI(dnsConf.APIToken)
 			if err != nil {
 				panic("TabVault could not be written to")
 			}
-			dnsConf.APIToken = "vault://" + id
 
 			app.DNSProviders[i] = dnsConf
 		}
 
+		conf.Apps[i] = app
 	}
 
 	return domainALPNMatchers, snialpnMatchers
 }
 
-func LintConfig(conf Config, allowedAlpns []string) error {
+func LintConfig(conf *Config, allowedAlpns []string) error {
 	if len(conf.AdminDNS.Domains) == 0 {
 		return fmt.Errorf("error: 'admin.domains' is empty")
 	}
