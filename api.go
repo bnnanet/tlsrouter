@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -179,12 +180,6 @@ func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rev, err := strconv.Atoi(oldConf.Revision)
-	if err == nil {
-		rev++
-		newConf.Revision = strconv.Itoa(rev)
-	}
-
 	newConf.FilePath = oldConf.FilePath
 	if err := newConf.Save(); err != nil {
 		// TODO panic
@@ -219,8 +214,8 @@ func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
 type APIService struct {
 	AppSlug      string   `json:"app_slug"`
 	Slug         string   `json:"slug"`
-	Comment      string   `json:"comment,omitempty"`
-	Disabled     bool     `json:"disabled,omitempty"`
+	Comment      *string  `json:"comment,omitempty"`
+	Disabled     *bool    `json:"disabled,omitempty"`
 	Domains      []string `json:"domains"`
 	ALPNs        []string `json:"alpns"`
 	BackendSlugs []string `json:"backend_slugs,omitempty"`
@@ -270,8 +265,8 @@ func (lc *ListenConfig) ListServices(w http.ResponseWriter, r *http.Request) {
 			service := APIService{
 				AppSlug:      app.Slug,
 				Slug:         srv.Slug,
-				Comment:      srv.Comment,
-				Disabled:     srv.Disabled,
+				Comment:      &srv.Comment,
+				Disabled:     &srv.Disabled,
 				Domains:      srv.Domains,
 				ALPNs:        srv.ALPNs,
 				BackendSlugs: backendSlugs,
@@ -334,11 +329,116 @@ func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
 
 	newConf := lc.newConfig.Load()
 	if newConf == nil {
+		// Ooopsies! We're not supposed to make a copy of this!!!
 		newConfVal := lc.LoadConfig()
+		rev, err := strconv.Atoi(newConfVal.Revision)
+		if err == nil {
+			rev++
+			newConfVal.Revision = strconv.Itoa(rev)
+		}
 		newConf = &newConfVal
 	}
 
-	// TODO update config
+	var apiSrv APIService
+	dec := json.NewDecoder(r.Body)
+	defer func() {
+		_ = r.Body.Close()
+	}()
+
+	if err := dec.Decode(&apiSrv); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotAcceptable)
+		_ = json.NewEncoder(w).Encode(ConfigError{
+			Error: "could not parse json input",
+		})
+		return
+	}
+
+	// TODO Disabled, Comments nil
+	// TODO Backends from Slugs
+	srv := ConfigService{
+		Domains:        apiSrv.Domains,
+		ALPNs:          apiSrv.ALPNs,
+		Backends:       make([]Backend, 0),
+		CurrentBackend: new(atomic.Uint32),
+	}
+	if apiSrv.Comment != nil {
+		srv.Comment = *apiSrv.Comment
+	}
+	if apiSrv.Disabled != nil {
+		srv.Disabled = *apiSrv.Disabled
+	}
+	srv.Slug = srv.GenSlug()
+	apiSrv.Slug = srv.Slug
+
+	for i, app := range newConf.Apps {
+		if app.Slug != apiSrv.AppSlug {
+			for _, other := range app.Services {
+				if other.Slug != srv.Slug {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(ConfigError{
+						Error: fmt.Sprintf("service slug '%s' conflicts with existing service in app '%s'", srv.Slug, app.Slug),
+					})
+					return
+				}
+			}
+			continue
+		}
+
+		var found bool
+		for i, existing := range app.Services {
+			if existing.Slug != srv.Slug {
+				continue
+			}
+			found = true
+
+			if apiSrv.Comment == nil {
+				srv.Comment = app.Services[i].Comment
+			}
+			if apiSrv.Disabled == nil {
+				srv.Disabled = app.Services[i].Disabled
+			}
+
+			if len(apiSrv.BackendSlugs) > 0 {
+				for _, slug := range apiSrv.BackendSlugs {
+					backend := findBackendBySlug(newConf, slug)
+					if backend == nil {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(ConfigError{
+							Error: fmt.Sprintf("backend slug '%s' not found", slug),
+						})
+						return
+					}
+					srv.Backends = append(srv.Backends, *backend)
+				}
+			} else {
+				srv.Backends = existing.Backends
+			}
+
+			app.Services[i] = srv
+			break
+		}
+
+		if !found {
+			for _, slug := range apiSrv.BackendSlugs {
+				backend := findBackendBySlug(newConf, slug)
+				if backend == nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(ConfigError{
+						Error: fmt.Sprintf("backend slug '%s' not found", slug),
+					})
+					return
+				}
+				srv.Backends = append(srv.Backends, *backend)
+			}
+			app.Services = append(app.Services, srv)
+		}
+
+		newConf.Apps[i] = app
+	}
 
 	newConf.Hash = newConf.ShortSHA2()
 	lc.newConfig.Store(newConf)
@@ -346,6 +446,20 @@ func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(newConf)
+}
+
+// findBackendBySlug searches for a backend by slug across all apps
+func findBackendBySlug(conf *Config, slug string) *Backend {
+	for _, app := range conf.Apps {
+		for _, svc := range app.Services {
+			for _, backend := range svc.Backends {
+				if backend.Slug == slug {
+					return &backend
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (lc *ListenConfig) ListConnections(w http.ResponseWriter, r *http.Request) {
