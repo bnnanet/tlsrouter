@@ -123,6 +123,9 @@ func (v *TabVault) Add(secret string) (string, error) {
 	}
 	writer.Flush()
 
+	if err := file.Sync(); err != nil {
+		return "", err
+	}
 	return id, file.Close()
 }
 
