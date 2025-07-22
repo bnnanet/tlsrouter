@@ -506,10 +506,13 @@ func NewListenConfig(conf Config) *ListenConfig {
 			}
 
 			domain := snialpn.SNI()
-			acmeConf, exists := issuerConfMap[domain]
-			if !exists {
+			acmeConf, hasDNSConf := issuerConfMap[domain]
+			if !hasDNSConf {
 				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (TLS-ALPN)\n", snialpn)
-				// note: certmagic doesn't support multi-SAN
+
+				lc.certmagicConfMap[domain] = lc.certmagicTLSALPNOnly
+				enabledDomains[domain] = struct{}{}
+
 				if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 				}
@@ -775,7 +778,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 	for {
 		select {
 		case conn := <-ch:
-			fmt.Fprintf(os.Stderr, "debug: proxy connection\n")
+			fmt.Fprintf(os.Stderr, "debug: accepted connection: %v\n", conn.RemoteAddr())
 			go func() {
 				_, _, _ = lc.proxy(conn)
 				// TODO log to error channel
@@ -819,9 +822,15 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			if alpns[0] == acmez.ACMETLS1Protocol {
-				// XXX TODO TODO TODO
-				// iterate over ALL backends and if ANY are terminated, terminate
-				panic("tls-apln challenge not supported yet")
+				// note: certmagicConfMap only holds backends that terminate
+				magic := lc.certmagicConfMap[domain]
+				if magic == lc.certmagicTLSALPNOnly {
+					snialpn = NewSNIALPN(domain, alpns[0])
+					_ = wconn.Passthru()
+					return magic.TLSConfig(), nil
+				}
+				snialpn = ""
+				return nil, fmt.Errorf("TLSALPN challenge for unknown domain %q", domain)
 			}
 
 			// happy path, e.g. "example.com:h2"
@@ -951,11 +960,21 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			// TODO error log channel
-			log.Printf("unknown tls handshake failure: %s", err)
+			log.Printf("unknown tls handshake failure: %v: %s", conn.RemoteAddr(), err)
 			return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), err
 		}
 
 		terminate = false
+	} else if backend == nil {
+		if snialpn.SNI() == acmez.ACMETLS1Protocol {
+			fmt.Println("solve(d)? TLS ALPN...")
+			return
+		}
+	}
+	if backend == nil {
+		// TODO this is panic-worthy (leaving in for testing)
+		fmt.Println("no backend for sni:alpn=", snialpn)
+		return
 	}
 
 	fmt.Println("do the next thing...")
