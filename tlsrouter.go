@@ -499,7 +499,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 	// }
 
 	for snialpn, m := range snialpnMatchers {
-		for _, backend := range m.Backends {
+		for beIndex, backend := range m.Backends {
 			if !backend.TerminateTLS {
 				continue
 			}
@@ -514,12 +514,10 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 				if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+					continue
 				}
-				continue
-			}
-			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
-
-			if _, exists := lc.certmagicConfMap[domain]; !exists {
+			} else if _, exists := lc.certmagicConfMap[domain]; !exists {
+				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
 				magic := lc.newCertmagic(acmeConf.DNSProvider)
 				lc.certmagicConfMap[domain] = magic
 				enabledDomains[domain] = struct{}{}
@@ -535,6 +533,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			}
 
 			alpn := snialpn.ALPN()
+			fmt.Fprintf(os.Stderr, "DEBUG: incoming snialpn %s", alpn)
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
 				backend.HTTPTunnel = tun.NewListener(lc.Context)
 
@@ -557,8 +556,10 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 				// default transport https://pkg.go.dev/net/http#DefaultTransport
 				dialer := &net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
+					// Timeout:       30 * time.Second,
+					Timeout:       400 * time.Millisecond, // TODO check internal/external, make user-configurable
+					FallbackDelay: 300 * time.Millisecond,
+					KeepAlive:     30 * time.Second,
 				}
 				transport := &http.Transport{
 					Proxy:                 http.ProxyFromEnvironment,
@@ -598,6 +599,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 				go func() {
 					_ = proxyServer.Serve(backend.HTTPTunnel)
 				}()
+				m.Backends[beIndex] = backend
 			}
 		}
 	}
@@ -909,20 +911,27 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				//       but in the future we do need a way to mark
 				//       a backend as active or inactive
 
-				isRawTCP := b.HTTPTunnel == nil && b.PROXYProto == 0
-				if isRawTCP {
-					backend = &b
-					break
-				}
+				backend = &b
 
 				var err error
 				beConn, err = getBackendConn(lc.Context, b.Host)
 				if err != nil {
 					// TODO mark as inactive and try next
-					return nil, fmt.Errorf("could not connect to backend %q", b.Host)
+					//backend = nil
+					fmt.Fprintf(os.Stderr, "could not connect to backend %q\n", b.Host)
 				}
-				if beConn != nil {
-					backend = &b
+
+				usesTunnel := b.HTTPTunnel != nil
+				if usesTunnel {
+					if beConn != nil {
+						_ = beConn.Close()
+					}
+					beConn = nil // we can't use raw beConn with internal or proxy tunnel
+					break
+				}
+
+				hideAlwaysTrueFromLinterWhileDeving := beConn == nil || beConn != nil
+				if hideAlwaysTrueFromLinterWhileDeving {
 					break
 				}
 			}
@@ -932,10 +941,8 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				return nil, ErrDoNotTerminate
 			}
 
-			fmt.Println("DEBUG: TERMINATE THE TLS!!")
+			fmt.Println("DEBUG: passthru (TERMINATE THE TLS!!)", domain, lc.certmagicConfMap[domain])
 			_ = wconn.Passthru()
-
-			fmt.Println("yo yo yo", domain, lc.certmagicConfMap[domain])
 
 			// TODO check snialpn support wildcards via config
 			// TODO get the cert directly
@@ -976,7 +983,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		return
 	}
 
-	fmt.Println("do the next thing...")
+	fmt.Println("DEBUG: handle with selected backend...")
 	if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
 		fmt.Println("PROXY PROTO...")
 		header := &proxyproto.Header{
@@ -993,7 +1000,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 	wconn.SNIALPN = snialpn
 	if terminate {
-		fmt.Println("PLAIN CONN...")
+		fmt.Println("DEBUG 1a: PLAIN CONN...")
 		cConn := NewPlainConn(tlsConn)
 		wconn.PlainConn = cConn
 	}
@@ -1001,8 +1008,11 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	lc.Conns.Store(wconn.ConnID(), wconn)
 
 	if !terminate {
-		fmt.Println("DEBUG 1: No terminate TLS...")
-		return wconn.tunnelTCPConn(beConn)
+		fmt.Println("DEBUG 1b: No terminate TLS...")
+		if beConn != nil {
+			return wconn.tunnelTCPConn(beConn)
+		}
+		return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), fmt.Errorf("bad gateway: no active backend available")
 	}
 
 	if backend.HTTPTunnel != nil {
@@ -1010,12 +1020,23 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		// doesn't block
 		retErr = backend.HTTPTunnel.Inject(wconn.PlainConn)
 		wconn.wg.Wait()
-	} else {
+	} else if beConn != nil {
 		fmt.Println("TunnelTCPConn(cConn, beConn)")
 		_, _, retErr = TunnelTCPConn(wconn.PlainConn, beConn)
 		_ = conn.Close()
+	} else {
+		// TODO
+		// - debug info (last seen)
+		// - respect content type (html, json)
+		msg := "502 Bad Gateway\n"
+		n := len(msg)
+		text := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", n, msg)
+		_, _ = wconn.PlainConn.Write([]byte(text))
+		_ = conn.Close()
+		fmt.Println("DEBUG: bad gateway")
+
 	}
-	fmt.Println("done")
+	fmt.Println("DEBUG: closed")
 	return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), retErr
 }
 
@@ -1132,7 +1153,8 @@ func (wconn *wrappedConn) tunnelTCPConn(beConn net.Conn) (r int64, w int64, retE
 
 func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
 	d := net.Dialer{
-		Timeout:       3 * time.Second,
+		// Timeout:       3 * time.Second,
+		Timeout:       400 * time.Millisecond,
 		LocalAddr:     nil,
 		FallbackDelay: 300 * time.Millisecond,
 		KeepAliveConfig: net.KeepAliveConfig{
