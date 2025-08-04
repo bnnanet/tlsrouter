@@ -455,8 +455,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			continue
 		case "duckdns":
 			apiToken := dnsConf.APIToken
-			if strings.HasPrefix(apiToken, "vault://") {
-				id := strings.TrimPrefix(apiToken, "vault://")
+			if id, ok := strings.CutPrefix(apiToken, "vault://"); ok {
 				apiToken = conf.TabVault.Get(id)
 			}
 			issuerConfMap[domain] = &ACMEDNS{
