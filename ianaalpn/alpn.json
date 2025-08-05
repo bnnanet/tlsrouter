@@ -137,7 +137,7 @@
     "protocol": "HTTP/2 over TCP",
     "name": "h2c",
     "bytes": "683263",
-    "reference": "[1][RFC9113]"
+    "reference": "[RFC9113]"
   },
   {
     "protocol": "WebRTC Media and Data",
