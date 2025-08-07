@@ -299,7 +299,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 	directoryEndpoint := conf.ACMEDirectoryEndpoint
 	if len(directoryEndpoint) == 0 {
 		// TODO staging vs prod
-		directoryEndpoint = certmagic.LetsEncryptStagingCA
+		// directoryEndpoint = certmagic.LetsEncryptStagingCA
+		directoryEndpoint = certmagic.LetsEncryptProductionCA
 	}
 
 	lc := &ListenConfig{
