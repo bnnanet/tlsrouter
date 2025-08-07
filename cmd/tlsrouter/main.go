@@ -166,11 +166,11 @@ func main() {
 		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 	}
 
-	conf.Handler = http.NewServeMux()
 	conf.SetSigChan(sigChan)
-	setupRouter(conf)
+	mux := http.NewServeMux()
+	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
-	_ = Start(&wg, lc, addr)
+	_ = Start(&wg, lc, addr, mux)
 
 	go func() {
 		for {
@@ -188,11 +188,11 @@ func main() {
 				if err != nil {
 					log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 				}
-				conf.Handler = http.NewServeMux()
 				conf.SetSigChan(sigChan)
-				setupRouter(conf)
+				mux := http.NewServeMux()
+				setupRouter(conf, mux)
 				lc2 := tlsrouter.NewListenConfig(conf)
-				_ = Start(&wg, lc2, addr)
+				_ = Start(&wg, lc2, addr, mux)
 
 				// Gracefully shutdown old server
 				go lc.Shutdown(context.Background())
@@ -218,13 +218,13 @@ func main() {
 	wg.Wait()
 }
 
-func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string) error {
+func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *http.ServeMux) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
 		log.Printf("\nListening on %s...", addr)
-		if err := lc.ListenAndProxy(addr); err != nil && !errors.Is(err, net.ErrClosed) {
+		if err := lc.ListenAndProxy(addr, mux); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Printf("Server error: %v", err)
 		}
 		log.Printf("Closed\n")
@@ -282,10 +282,9 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 	return conf, nil
 }
 
-func setupRouter(conf tlsrouter.Config) {
+func setupRouter(conf tlsrouter.Config, mux *http.ServeMux) {
 	handleStatus := createHandleStatus(conf, time.Now())
 
-	mux := conf.Handler
 	mux.HandleFunc("GET /version", handleVersion)
 	mux.HandleFunc("GET /api/version", handleVersion)
 	mux.HandleFunc("GET /api/public/version", handleVersion)

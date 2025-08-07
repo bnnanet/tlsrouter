@@ -64,7 +64,7 @@ type Config struct {
 	FileTime              time.Time          `json:"-"` // from file date
 	sigChan               chan os.Signal     `json:"-"`
 	TabVault              *tabvault.TabVault `json:"-"`
-	AdminDNS              ConfigDNS          `json:"admin"`
+	AdminDNS              ConfigAdmin        `json:"admin"`
 	Apps                  []ConfigApp        `json:"apps"`
 	certmagicStorage      certmagic.Storage  `json:"-"`
 }
@@ -166,6 +166,12 @@ func (srv *ConfigService) GenSlug() string {
 
 	slug := domain + "-" + alpn
 	return slug
+}
+
+type ConfigAdmin struct {
+	ConfigDNS
+	AdminUser  string `json:"admin_username"`
+	AdminToken string `json:"admin_token"`
 }
 
 // ConfigDNS defines libdns-style DNS API options
@@ -333,14 +339,34 @@ func NewListenConfig(conf Config) *ListenConfig {
 			strings.Join(conf.AdminDNS.Domains, ", "),
 		)
 	} else {
-		var err error
-		conf.AdminDNS.APIToken, err = conf.TabVault.ToVaultURI(conf.AdminDNS.APIToken)
+		newDNSTokenURI, err := conf.TabVault.ToVaultURI(conf.AdminDNS.APIToken)
 		if err != nil {
-			panic("TabVault could not be written to")
+			panic("admin DNS API Token could not be written to TabVault")
+		}
+		if newDNSTokenURI != conf.AdminDNS.APIToken {
+			conf.AdminDNS.APIToken = newDNSTokenURI
+			if err := conf.Save(); err != nil {
+				panic(err)
+			}
 		}
 
+		configDNS := conf.AdminDNS.ConfigDNS
+		adminDNS := &configDNS
 		for _, domain := range conf.AdminDNS.Domains {
-			dnsConfByDomain[domain] = &conf.AdminDNS
+			dnsConfByDomain[domain] = adminDNS
+		}
+	}
+	if len(conf.AdminDNS.AdminUser) > 0 &&
+		len(conf.AdminDNS.AdminToken) > 0 {
+		newAdminTokenURI, err := conf.TabVault.ToVaultURI(conf.AdminDNS.AdminToken)
+		if err != nil {
+			panic("admin Internal API Token could not be written to TabVault")
+		}
+		if newAdminTokenURI != conf.AdminDNS.AdminToken {
+			conf.AdminDNS.AdminToken = newAdminTokenURI
+			if err := conf.Save(); err != nil {
+				panic(err)
+			}
 		}
 	}
 
@@ -726,18 +752,17 @@ func reusePort(network, address string, conn syscall.RawConn) error {
 	})
 }
 
-func (lc *ListenConfig) ListenAndProxy(addr string) error {
+func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 	ch := make(chan net.Conn)
 
-	conf := lc.LoadConfig()
-	conf.Handler.HandleFunc("GET /api/config/current", lc.GetConfig)
-	conf.Handler.HandleFunc("GET /api/config/new", lc.GetNewConfig)
-	conf.Handler.HandleFunc("PUT /api/config/new/{HashOrRev}", lc.SetNewConfig)
-	conf.Handler.HandleFunc("GET /api/services", lc.ListServices)
-	conf.Handler.HandleFunc("POST /api/services", lc.SetService)
-	conf.Handler.HandleFunc("GET /api/connections", lc.ListConnections)
-	conf.Handler.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.CloseRemotes)
-	conf.Handler.HandleFunc("DELETE /api/clients/{Service}", lc.CloseClients)
+	mux.HandleFunc("GET /api/config/current", lc.RouteGetConfig)
+	mux.HandleFunc("GET /api/config/new", lc.RouteGetNewConfig)
+	mux.HandleFunc("PUT /api/config/new/{HashOrRev}", lc.RouteSetNewConfig)
+	mux.HandleFunc("GET /api/services", lc.RouteListServices)
+	mux.HandleFunc("POST /api/services", lc.RouteSetService)
+	mux.HandleFunc("GET /api/connections", lc.RouteListConnections)
+	mux.HandleFunc("DELETE /api/remotes/{RemoteAddr}", lc.RouteCloseRemotes)
+	mux.HandleFunc("DELETE /api/clients/{Service}", lc.RouteCloseClients)
 
 	go func() {
 		protocols := &http.Protocols{}
@@ -746,7 +771,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string) error {
 		protocols.SetUnencryptedHTTP2(true)
 
 		lc.adminServer = &http.Server{
-			Handler: conf.Handler,
+			Handler: mux,
 			BaseContext: func(_ net.Listener) context.Context {
 				return lc.Context
 			},

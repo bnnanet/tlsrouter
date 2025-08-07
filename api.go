@@ -112,20 +112,40 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 	return pconn
 }
 
-func (lc *ListenConfig) GetConfig(w http.ResponseWriter, r *http.Request) {
+func (c *Config) requireToken(w http.ResponseWriter, r *http.Request) bool {
+	username, password, ok := r.BasicAuth()
+
+	adminToken := c.TabVault.Get(c.AdminDNS.AdminToken)
+	p := BasicAuthPassword(adminToken)
+	if !ok || !p.Verify(username, password) {
+		jsonError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Invalid credentials")
+		return false
+	}
+	return true
+}
+
+func (lc *ListenConfig) RouteGetConfig(w http.ResponseWriter, r *http.Request) {
 	lc.newMu.Lock()
 	defer lc.newMu.Unlock()
 
-	conf := lc.LoadConfig()
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(conf)
+	_ = json.NewEncoder(w).Encode(curConf)
 }
 
-func (lc *ListenConfig) GetNewConfig(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteGetNewConfig(w http.ResponseWriter, r *http.Request) {
 	lc.newMu.Lock()
 	defer lc.newMu.Unlock()
+
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
 
 	newConf := lc.newConfig.Load()
 	if newConf == nil {
@@ -150,9 +170,14 @@ type ConfigError struct {
 	Error string `json:"error"`
 }
 
-func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteSetNewConfig(w http.ResponseWriter, r *http.Request) {
 	lc.newMu.Lock()
 	defer lc.newMu.Unlock()
+
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 
@@ -173,14 +198,13 @@ func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oldConf := lc.LoadConfig()
-	if oldConf.Hash == newConf.Hash {
+	if curConf.Hash == newConf.Hash {
 		w.WriteHeader(http.StatusNotModified)
 		_ = json.NewEncoder(w).Encode(nil)
 		return
 	}
 
-	newConf.FilePath = oldConf.FilePath
+	newConf.FilePath = curConf.FilePath
 	if err := newConf.Save(); err != nil {
 		// TODO panic
 		w.WriteHeader(http.StatusInternalServerError)
@@ -204,10 +228,10 @@ func (lc *ListenConfig) SetNewConfig(w http.ResponseWriter, r *http.Request) {
 	// actually we need to regen and replace all the config stuff
 	// (because we don't have idle detection for ssh, postgresql, smb, etc
 	// and using the old config will eventually lead to strange bad gateway errors)
-	oldConf.Reincarnate()
+	curConf.Reincarnate()
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(&oldConf)
+	_ = json.NewEncoder(w).Encode(&curConf)
 }
 
 // APIService defines a rule for matching domains and ALPNs to backends.
@@ -221,14 +245,18 @@ type APIService struct {
 	BackendSlugs []string `json:"backend_slugs,omitempty"`
 }
 
-func (lc *ListenConfig) ListServices(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteListServices(w http.ResponseWriter, r *http.Request) {
 	lc.newMu.Lock()
 	defer lc.newMu.Unlock()
 
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
+
 	newConf := lc.newConfig.Load()
 	if newConf == nil {
-		conf := lc.LoadConfig()
-		newConf = &conf
+		newConf = &curConf
 	}
 	services := []APIService{}
 
@@ -323,9 +351,14 @@ func (lc *ListenConfig) ListServices(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(services)
 }
 
-func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteSetService(w http.ResponseWriter, r *http.Request) {
 	lc.newMu.Lock()
 	defer lc.newMu.Unlock()
+
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
 
 	newConf := lc.newConfig.Load()
 	if newConf == nil {
@@ -374,7 +407,7 @@ func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
 	for i, app := range newConf.Apps {
 		if app.Slug != apiSrv.AppSlug {
 			for _, other := range app.Services {
-				if other.Slug != srv.Slug {
+				if other.Slug == srv.Slug {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusConflict)
 					_ = json.NewEncoder(w).Encode(ConfigError{
@@ -402,6 +435,10 @@ func (lc *ListenConfig) SetService(w http.ResponseWriter, r *http.Request) {
 
 			if len(apiSrv.BackendSlugs) > 0 {
 				for _, slug := range apiSrv.BackendSlugs {
+					// TODO add or replace
+					// { backends: [
+					//     slug, address, port, terminate_tls, connect_tls, connect_skip_verify
+					// ] }
 					backend := findBackendBySlug(newConf, slug)
 					if backend == nil {
 						w.Header().Set("Content-Type", "application/json")
@@ -462,7 +499,15 @@ func findBackendBySlug(conf *Config, slug string) *Backend {
 	return nil
 }
 
-func (lc *ListenConfig) ListConnections(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteListConnections(w http.ResponseWriter, r *http.Request) {
+	lc.newMu.Lock() // not necessary for listing conns, just for consistency
+	defer lc.newMu.Unlock()
+
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
+
 	list := []PConn{}
 
 	lc.Conns.Range(func(_, v any) bool {
@@ -480,7 +525,15 @@ func (lc *ListenConfig) ListConnections(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(list)
 }
 
-func (lc *ListenConfig) CloseRemotes(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteCloseRemotes(w http.ResponseWriter, r *http.Request) {
+	lc.newMu.Lock() // not necessary for closing remotes, just for consistency
+	defer lc.newMu.Unlock()
+
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
+
 	var selfToClose *wrappedConn
 	list := []PConn{}
 
@@ -516,7 +569,15 @@ func (lc *ListenConfig) CloseRemotes(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-func (lc *ListenConfig) CloseClients(w http.ResponseWriter, r *http.Request) {
+func (lc *ListenConfig) RouteCloseClients(w http.ResponseWriter, r *http.Request) {
+	lc.newMu.Lock() // not necessary for closing clients, just for consistency
+	defer lc.newMu.Unlock()
+
+	curConf := lc.LoadConfig()
+	if ok := curConf.requireToken(w, r); !ok {
+		return
+	}
+
 	snialpn := r.PathValue("Service")
 	fmt.Println("SNIALPN Query", snialpn)
 	list, selfToClose := lc.closeClients(snialpn, r.RemoteAddr)
