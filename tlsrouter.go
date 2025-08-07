@@ -516,7 +516,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
 					continue
 				}
-			} else if _, exists := lc.certmagicConfMap[domain]; !exists {
+			}
+			if _, exists := lc.certmagicConfMap[domain]; !exists {
 				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
 				magic := lc.newCertmagic(acmeConf.DNSProvider)
 				lc.certmagicConfMap[domain] = magic
