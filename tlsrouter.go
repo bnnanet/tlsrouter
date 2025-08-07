@@ -915,7 +915,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 							HTTPTunnel:   lc.adminTunnel,
 						}
 						_ = wconn.Passthru()
-						fmt.Println("2 yo yo yo", domain, lc.certmagicConfMap[domain])
+						if lc.certmagicConfMap[domain] == nil {
+							return nil, fmt.Errorf("SANITY FAIL: missing ACME config for domain %q", domain)
+						}
 						return &tls.Config{
 							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
 							NextProtos:     []string{clientALPN},
