@@ -808,8 +808,11 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 		case conn := <-ch:
 			fmt.Fprintf(os.Stderr, "debug: accepted connection: %v\n", conn.RemoteAddr())
 			go func() {
-				_, _, _ = lc.proxy(conn)
-				// TODO log to error channel
+				_, _, err = lc.proxy(conn)
+				if err != nil {
+					// TODO log to error channel
+					_ = conn.Close()
+				}
 			}()
 		case <-lc.Context.Done():
 			lc.done <- context.Background()
