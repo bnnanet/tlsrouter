@@ -133,5 +133,5 @@ func (v *TabVault) Get(id string) string {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	return v.secrets[id]
+	return v.secrets[strings.TrimPrefix(id, "vault://")]
 }
