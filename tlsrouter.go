@@ -495,29 +495,32 @@ func NewListenConfig(conf Config) *ListenConfig {
 		}
 	}
 
-	enabledDomains := make(map[string]struct{}) // TODO check vs configured
+	registerACMEDomain := func(domain string) error {
+		if _, exists := lc.certmagicConfMap[domain]; exists {
+			return nil
+		}
+
+		// note: to stop managing a certificate:
+		// lc.certmagicCache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: domain}})
+
+		if acmeConf, hasDNSConf := issuerConfMap[domain]; hasDNSConf {
+			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (DNS config)\n", domain)
+			// note: would be better to have certmagic per-provider, maybe
+			magic := lc.newCertmagic(acmeConf.DNSProvider)
+			lc.certmagicConfMap[domain] = magic
+			// note: certmagic's domain array creates a config for each - it doesn't support multi-SAN
+			return magic.ManageSync(lc.Context, []string{domain})
+		}
+
+		fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for domain %q (TLS-ALPN)\n", domain)
+		lc.certmagicConfMap[domain] = lc.certmagicTLSALPNOnly
+		return lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain})
+	}
+
 	for _, domain := range conf.AdminDNS.Domains {
-		fmt.Println("load cmcm domain", domain)
-		if _, exists := lc.certmagicConfMap[domain]; exists {
-			continue
-		}
-
-		acmeConf, exists := issuerConfMap[domain]
-		fmt.Println("load cmcm acme", exists, acmeConf)
-		if !exists {
-			continue
-		}
-		enabledDomains[domain] = struct{}{}
-
-		if _, exists := lc.certmagicConfMap[domain]; exists {
-			continue
-		}
-
-		magic := lc.newCertmagic(acmeConf.DNSProvider)
-		lc.certmagicConfMap[domain] = magic
-		// note: certmagic doesn't support multi-SAN
-		if err := magic.ManageSync(lc.Context, []string{domain}); err != nil {
+		if err := registerACMEDomain(domain); err != nil {
 			fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+			continue
 		}
 	}
 
@@ -532,27 +535,9 @@ func NewListenConfig(conf Config) *ListenConfig {
 			}
 
 			domain := snialpn.SNI()
-			acmeConf, hasDNSConf := issuerConfMap[domain]
-			if !hasDNSConf {
-				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (TLS-ALPN)\n", snialpn)
-
-				lc.certmagicConfMap[domain] = lc.certmagicTLSALPNOnly
-				enabledDomains[domain] = struct{}{}
-
-				if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
-					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
-					continue
-				}
-			}
-			if _, exists := lc.certmagicConfMap[domain]; !exists {
-				fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (specific config)\n", snialpn)
-				magic := lc.newCertmagic(acmeConf.DNSProvider)
-				lc.certmagicConfMap[domain] = magic
-				enabledDomains[domain] = struct{}{}
-				// note: certmagic doesn't support multi-SAN
-				if err := magic.ManageSync(lc.Context, []string{domain}); err != nil {
-					fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
-				}
+			if err := registerACMEDomain(domain); err != nil {
+				fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+				continue
 			}
 
 			if backend.PROXYProto > 0 {
