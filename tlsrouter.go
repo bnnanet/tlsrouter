@@ -114,13 +114,17 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	enc := json.NewEncoder(file)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "   ")
-	if err := enc.Encode(c); err != nil {
+	if err := c.ToCSV(file); err != nil {
 		return err
 	}
+	// enc := json.NewEncoder(file)
+	// enc.SetEscapeHTML(false)
+	// enc.SetIndent("", "   ")
+	// if err := enc.Encode(c); err != nil {
+	// 	return err
+	// }
 
+	// don't wait for os cache to flush
 	if err := file.Sync(); err != nil {
 		return err
 	}
@@ -143,13 +147,14 @@ type ConfigApp struct {
 
 // ConfigService defines a rule for matching domains and ALPNs to backends.
 type ConfigService struct {
-	Slug           string         `json:"slug"`
-	Comment        string         `json:"comment,omitempty"`
-	Disabled       bool           `json:"disabled,omitempty"`
-	Domains        []string       `json:"domains"`
-	ALPNs          []string       `json:"alpns,omitempty"`
-	Backends       []Backend      `json:"backends"`
-	CurrentBackend *atomic.Uint32 `json:"-"`
+	Slug                   string         `json:"slug"`
+	Comment                string         `json:"comment,omitempty"`
+	Disabled               bool           `json:"disabled,omitempty"`
+	Domains                []string       `json:"domains"`
+	ALPNs                  []string       `json:"alpns,omitempty"`
+	Backends               []Backend      `json:"backends"`
+	CurrentBackend         *atomic.Uint32 `json:"-"`
+	AllowedClientHostnames []string       `json:"allowed_client_hostnames,omitempty"`
 }
 
 func (srv *ConfigService) GenSlug() string {
@@ -1348,178 +1353,4 @@ func (tc *PlainConn) Write(b []byte) (int, error) {
 	n, err := tc.Conn.Write(b)
 	tc.BytesWritten.Add(uint64(n))
 	return n, err
-}
-
-func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*ConfigService) {
-	domainALPNMatchers := map[string][]string{}
-	snialpnMatchers := map[SNIALPN]*ConfigService{}
-
-	for i, app := range conf.Apps {
-		for i, srv := range app.Services {
-			if len(srv.Backends) == 0 {
-				fmt.Println("debug: warn: service has no backends")
-				continue
-			}
-
-			if len(srv.Domains) == 0 {
-				fmt.Println("debug: warn: service has no domains")
-				continue
-			}
-
-			if len(srv.ALPNs) == 0 {
-				srv.ALPNs = append(srv.ALPNs, "http/1.1")
-			}
-
-			if len(srv.Slug) == 0 {
-				// TODO make sure this doesn't conflict with other slugs
-				srv.Slug = srv.GenSlug()
-			}
-
-			for i, be := range srv.Backends {
-				if len(be.Slug) == 0 {
-					addr := strings.ReplaceAll(be.Address, ".", "-")
-					addr = strings.ReplaceAll(addr, ":", "-")
-					addr = strings.ReplaceAll(addr, "--", "-")
-					// TODO make sure this doesn't conflict with other slugs
-					be.Slug = addr + "--" + fmt.Sprintf("%d", be.Port)
-				}
-				srv.Backends[i] = be
-			}
-
-			for _, domain := range srv.Domains {
-				// Example.com => example.com
-				domain = strings.ToLower(domain)
-
-				// *.example.com => .example.com
-				domain = strings.TrimPrefix(domain, "*")
-
-				alpns := domainALPNMatchers[domain]
-				for _, alpn := range srv.ALPNs {
-					if !slices.Contains(alpns, alpn) {
-						alpns = append(alpns, alpn)
-						domainALPNMatchers[domain] = alpns
-					}
-
-					snialpn := NewSNIALPN(domain, alpn)
-
-					tlsMatch := snialpnMatchers[snialpn]
-					if tlsMatch == nil {
-						tlsMatch = &ConfigService{
-							CurrentBackend: new(atomic.Uint32),
-						}
-						snialpnMatchers[snialpn] = tlsMatch
-					}
-
-					for _, b := range srv.Backends {
-						// fmt.Printf("\n\nDEBUG: m.Backends[i] %#v\n", b)
-						b.Host = fmt.Sprintf("%s:%d", b.Address, b.Port)
-						tlsMatch.Backends = append(tlsMatch.Backends, b)
-					}
-				}
-			}
-			app.Services[i] = srv
-		}
-
-		for i, dnsConf := range app.DNSProviders {
-			if len(dnsConf.APIToken) == 0 {
-				continue
-			}
-
-			var err error
-			dnsConf.APIToken, err = conf.TabVault.ToVaultURI(dnsConf.APIToken)
-			if err != nil {
-				panic("TabVault could not be written to")
-			}
-
-			app.DNSProviders[i] = dnsConf
-		}
-
-		conf.Apps[i] = app
-	}
-
-	return domainALPNMatchers, snialpnMatchers
-}
-
-func LintConfig(conf *Config, allowedAlpns []string) error {
-	if len(conf.AdminDNS.Domains) == 0 {
-		return fmt.Errorf("error: 'admin.domains' is empty")
-	}
-
-	for _, domain := range conf.AdminDNS.Domains {
-		d := strings.ToLower(domain)
-
-		if domain != d {
-			return fmt.Errorf("lint: domain is not lowercase: %q", domain)
-		}
-	}
-
-	var hasActiveService bool
-	for _, app := range conf.Apps {
-		if app.Disabled {
-			continue
-		}
-		for _, srv := range app.Services {
-			if srv.Disabled {
-				continue
-			}
-			hasActiveService = true
-			break
-		}
-		if hasActiveService {
-			break
-		}
-	}
-	if !hasActiveService {
-		// TODO once we can edit the config via API, this is not a problem
-		return fmt.Errorf("error: no 'apps' with active (non-disabled) 'services'")
-	}
-
-	for _, app := range conf.Apps {
-		for _, srv := range app.Services {
-			snialpns := strings.Join(srv.Domains, ",") + "; " + strings.Join(srv.ALPNs, ",")
-
-			for _, domain := range srv.Domains {
-				d := strings.ToLower(domain)
-
-				if domain != d {
-					return fmt.Errorf("lint: domain is not lowercase: %q", domain)
-				}
-
-				if strings.HasPrefix(domain, "*") {
-					if !strings.HasPrefix(domain, "*.") {
-						return fmt.Errorf("lint: invalid use of wildcard %q (must be '*.')", domain)
-					}
-				}
-			}
-
-			if len(allowedAlpns) > 0 {
-				for _, alpn := range srv.ALPNs {
-					if !slices.Contains(allowedAlpns, alpn) {
-						if alpn != "*" {
-							return fmt.Errorf("lint: unknown alpn %q", alpn)
-						}
-					}
-				}
-			}
-
-			if len(srv.ALPNs) == 0 {
-				return fmt.Errorf("domains set %q have no 'alpns' defined", snialpns)
-			}
-
-			if len(srv.Backends) == 0 {
-				fmt.Fprintf(os.Stderr, "warn: domains+alpns set %q have no 'backends' defined", snialpns)
-			}
-
-			for i, b := range srv.Backends {
-				if b.Address == "" {
-					return fmt.Errorf("target %d in set %q has empty 'address'", i, snialpns)
-				}
-				if b.Port == 0 {
-					return fmt.Errorf("target %d in set %q has empty 'port'", i, snialpns)
-				}
-			}
-		}
-	}
-
-	return nil
 }
