@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -92,7 +93,7 @@ func main() {
 	bind := defaultBind
 	mainFlags.StringVar(&bind, "bind", defaultBind, "Address to bind to")
 
-	defaultConfPath := "tlsrouter.json"
+	defaultConfPath := "tlsrouter.csv"
 	// Check BIND environment variable, override default if set
 	if envConfPath := os.Getenv("CONFIG_FILE"); envConfPath != "" {
 		defaultConfPath = envConfPath
@@ -233,18 +234,22 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *htt
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
-func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Config, err error) {
+func ReadConfig(filePath string, tabVault *tabvault.TabVault) (tlsrouter.Config, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return tlsrouter.Config{}, err
+	}
+	defer func() { _ = file.Close() }()
+
+	reader := csv.NewReader(file)
+	//reader.Comma = '\t'
+	conf, err := tlsrouter.ReadCSVToConfig(reader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading CSV: %v\n", err)
+		os.Exit(1)
+	}
 	conf.FilePath = filePath
 	conf.TabVault = tabVault
-
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return conf, fmt.Errorf("failed to read config file %s: %w", filePath, err)
-	}
-
-	if err := json.Unmarshal(data, &conf); err != nil {
-		return conf, fmt.Errorf("failed to parse config JSON: %w", err)
-	}
 
 	customAlpns := []string{"ssh"}
 	knownAlpns := ianaalpn.Names
@@ -255,12 +260,12 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 		}
 	}
 
-	if err := tlsrouter.LintConfig(&conf, knownAlpns); nil != err {
-		return conf, err
+	if err := tlsrouter.LintConfig(conf, knownAlpns); nil != err {
+		return *conf, err
 	}
 
 	// alpnsByDomain, configByALPN := tlsrouter.NormalizeConfig(conf)
-	_, _ = tlsrouter.NormalizeConfig(&conf)
+	_, _ = tlsrouter.NormalizeConfig(conf)
 
 	for _, app := range conf.Apps {
 		for _, srv := range app.Services {
@@ -274,12 +279,12 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault) (conf tlsrouter.Co
 
 	info, err := os.Stat(filePath)
 	if err != nil {
-		return conf, fmt.Errorf("config file disappeared %s: %w", filePath, err)
+		return *conf, fmt.Errorf("config file disappeared %s: %w", filePath, err)
 	}
 	conf.FileTime = info.ModTime()
 
 	conf.Hash = conf.ShortSHA2()
-	return conf, nil
+	return *conf, nil
 }
 
 func setupRouter(conf tlsrouter.Config, mux *http.ServeMux) {
