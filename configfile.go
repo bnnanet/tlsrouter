@@ -384,7 +384,7 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 				Port:            port,
 				TerminateTLS:    terminateTLS,
 				ConnectTLS:      connectTLS,
-				ConnectInsecure: connectInsecure,
+				SkipTLSVerify: connectInsecure,
 			}
 			service.Backends = append(service.Backends, backend)
 		}
@@ -423,7 +423,7 @@ type CSVRecord struct {
 	BackendPort            uint16
 	TerminateTLS           bool
 	ConnectTLS             bool
-	ConnectInsecure        bool
+	SkipTLSVerify        bool
 	AllowedClientHostnames string
 }
 
@@ -454,7 +454,7 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 							BackendPort:            backend.Port,
 							TerminateTLS:           backend.TerminateTLS,
 							ConnectTLS:             backend.ConnectTLS,
-							ConnectInsecure:        backend.ConnectInsecure,
+							SkipTLSVerify:        backend.SkipTLSVerify,
 							AllowedClientHostnames: strings.Join(service.AllowedClientHostnames, ";"),
 						})
 					}
@@ -492,8 +492,8 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 		if a.ConnectTLS != b.ConnectTLS {
 			return strings.Compare(fmt.Sprintf("%t", a.ConnectTLS), fmt.Sprintf("%t", b.ConnectTLS))
 		}
-		if a.ConnectInsecure != b.ConnectInsecure {
-			return strings.Compare(fmt.Sprintf("%t", a.ConnectInsecure), fmt.Sprintf("%t", b.ConnectInsecure))
+		if a.SkipTLSVerify != b.SkipTLSVerify {
+			return strings.Compare(fmt.Sprintf("%t", a.SkipTLSVerify), fmt.Sprintf("%t", b.SkipTLSVerify))
 		}
 		return strings.Compare(a.AllowedClientHostnames, b.AllowedClientHostnames)
 	})
@@ -518,7 +518,7 @@ func RecordsToCSV(csvw *csv.Writer, records []CSVRecord) error {
 			fmt.Sprintf("%d", record.BackendPort),
 			fmt.Sprintf("%t", record.TerminateTLS),
 			fmt.Sprintf("%t", record.ConnectTLS),
-			fmt.Sprintf("%t", record.ConnectInsecure),
+			fmt.Sprintf("%t", record.SkipTLSVerify),
 			record.AllowedClientHostnames,
 		}
 		if err := csvw.Write(csvRow); err != nil {

@@ -13,7 +13,7 @@ type Backend struct {
 	Port            int    `json:"port"`
 	TerminateTLS    bool   `json:"terminate_tls"`
 	ConnectTLS      bool   `json:"connect_tls"`
-	ConnectInsecure bool   `json:"connect_insecure"`
+	SkipTLSVerify bool   `json:"connect_insecure"`
 }
 
 type Service struct {
@@ -56,7 +56,7 @@ func main() {
 						fmt.Printf("%s\t%s\t%s\t%s\t%d\t%v\t%v\t%v\n",
 							app.Slug, domain, alpn,
 							backend.Address, backend.Port,
-							backend.TerminateTLS, backend.ConnectTLS, backend.ConnectInsecure)
+							backend.TerminateTLS, backend.ConnectTLS, backend.SkipTLSVerify)
 					}
 				}
 			}

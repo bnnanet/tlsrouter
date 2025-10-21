@@ -17,7 +17,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +38,8 @@ import (
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
+var ErrUnknownNetwork = fmt.Errorf("the target ip is not part of a known network")
+var errTryNext = fmt.Errorf("no worries, carry on")
 
 var HTTPFamilyALPNs = []string{
 	"h3",
@@ -67,6 +71,8 @@ type Config struct {
 	AdminDNS              ConfigAdmin        `json:"admin"`
 	Apps                  []ConfigApp        `json:"apps"`
 	certmagicStorage      certmagic.Storage  `json:"-"`
+	Networks              []net.IPNet        `json:"dynamic_host_networks"`
+	IPDomain              string             `json:"dynamic_ip_domain"`
 }
 
 // ShortSHA2 is not safe for use after atomic Store()
@@ -92,7 +98,7 @@ func (c *Config) ShortSHA2() string {
 
 func (c *Config) SetSigChan(sigChan chan os.Signal) {
 	if c.sigChan != nil {
-		panic("'sigChan' can only be set once")
+		panic(errors.New("'sigChan' can only be set once"))
 	}
 	c.sigChan = sigChan
 }
@@ -203,19 +209,19 @@ type ACMEDNS struct {
 
 // Backend defines a proxy destination.
 type Backend struct {
-	Slug            string             `json:"slug"`
-	Comment         string             `json:"comment,omitempty"`
-	Disabled        bool               `json:"disabled,omitempty"`
-	ALPNs           []string           `json:"alpns,omitempty"`
-	Address         string             `json:"address"`
-	Port            uint16             `json:"port"`
-	Host            string             `json:"-"`
-	HTTPTunnel      tun.InjectListener `json:"-"`
-	PROXYProto      int                `json:"proxy_protocol,omitempty"`
-	TerminateTLS    bool               `json:"terminate_tls"`
-	ForceHTTP       bool               `json:"force_http,omitempty"`
-	ConnectTLS      bool               `json:"connect_tls"`
-	ConnectInsecure bool               `json:"connect_insecure"`
+	Slug          string             `json:"slug"`
+	Comment       string             `json:"comment,omitempty"`
+	Disabled      bool               `json:"disabled,omitempty"`
+	ALPNs         []string           `json:"alpns,omitempty"`
+	Address       string             `json:"address"`
+	Port          uint16             `json:"port"`
+	Host          string             `json:"-"`
+	HTTPTunnel    tun.InjectListener `json:"-"`
+	PROXYProto    int                `json:"proxy_protocol,omitempty"`
+	TerminateTLS  bool               `json:"terminate_tls"`
+	ForceHTTP     bool               `json:"force_http,omitempty"`
+	ConnectTLS    bool               `json:"connect_tls"`
+	SkipTLSVerify bool               `json:"connect_insecure"`
 	// Healthy         *atomic.Bool       `json:"-"`
 	// ConnectSNI      string             `json:"connect_sni,omitempty"`
 	// ConnectALPNs    string             `json:"connect_alpn,omitempty"`
@@ -269,6 +275,9 @@ type ListenConfig struct {
 	netConf               net.ListenConfig
 	adminServer           *http.Server
 	netLn                 net.Listener
+	slowCertmagicConfMap  map[string]struct{}
+	slowConfigBySNIALPN   map[SNIALPN]*ConfigService
+	slowConfigMu          sync.RWMutex
 }
 
 // TODO move to *Listener
@@ -280,21 +289,27 @@ func (lc *ListenConfig) Shutdown(ctx context.Context) {
 }
 
 func NewListenConfig(conf Config) *ListenConfig {
+	var lc *ListenConfig
 	domainMatchers, snialpnMatchers := NormalizeConfig(&conf)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	issuerConfMap := make(map[string]*ACMEDNS)
-	certmagicConfMap := make(map[string]*certmagic.Config)
 	certmagicStorage := conf.certmagicStorage
 	if certmagicStorage == nil {
 		certmagicStorage = &certmagic.FileStorage{Path: certmagicDataDir()}
 	}
 	certmagicCache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
-			magic, exists := certmagicConfMap[cert.Names[0]] // len(Names) > 0 is guaranteed
+			magic, exists := lc.certmagicConfMap[cert.Names[0]] // len(Names) >= 0 is guaranteed
 			if !exists {
-				return nil, fmt.Errorf("impossible error: pre-configured domain %q is no longer configured", strings.Join(cert.Names, ", "))
+				lc.slowConfigMu.RLock()
+				_, exists = lc.slowCertmagicConfMap[cert.Names[0]]
+				lc.slowConfigMu.RUnlock()
+
+				if !exists {
+					return nil, fmt.Errorf("impossible error: pre-configured domain %q is no longer configured", strings.Join(cert.Names, ", "))
+				}
+				magic = lc.certmagicTLSALPNOnly
 			}
 			return magic, nil
 		},
@@ -308,18 +323,22 @@ func NewListenConfig(conf Config) *ListenConfig {
 		directoryEndpoint = certmagic.LetsEncryptProductionCA
 	}
 
-	lc := &ListenConfig{
+	lc = &ListenConfig{
 		adminTunnel:           tun.NewListener(ctx),
+		newMu:                 sync.Mutex{},
 		Conns:                 sync.Map{},
 		TLSMismatches:         sync.Map{},
 		alpnsByDomain:         domainMatchers,
 		configBySNIALPN:       snialpnMatchers,
+		slowConfigBySNIALPN:   make(map[SNIALPN]*ConfigService),
 		Context:               ctx,
 		Close:                 cancel,
 		ACMEDirectoryEndpoint: directoryEndpoint,
-		issuerConfMap:         issuerConfMap,
+		issuerConfMap:         make(map[string]*ACMEDNS),
 		certmagicTLSALPNOnly:  nil,
-		certmagicConfMap:      certmagicConfMap,
+		certmagicConfMap:      make(map[string]*certmagic.Config),
+		slowCertmagicConfMap:  make(map[string]struct{}),
+		slowConfigMu:          sync.RWMutex{},
 		certmagicStorage:      certmagicStorage,
 		certmagicCache:        certmagicCache,
 		done:                  make(chan context.Context),
@@ -347,7 +366,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 	} else {
 		newDNSTokenURI, err := conf.TabVault.ToVaultURI(conf.AdminDNS.APIToken)
 		if err != nil {
-			panic("admin DNS API Token could not be written to TabVault")
+			panic(errors.New("admin DNS API Token could not be written to TabVault"))
 		}
 		if newDNSTokenURI != conf.AdminDNS.APIToken {
 			conf.AdminDNS.APIToken = newDNSTokenURI
@@ -366,7 +385,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		len(conf.AdminDNS.AdminToken) > 0 {
 		newAdminTokenURI, err := conf.TabVault.ToVaultURI(conf.AdminDNS.AdminToken)
 		if err != nil {
-			panic("admin Internal API Token could not be written to TabVault")
+			panic(errors.New("admin Internal API Token could not be written to TabVault"))
 		}
 		if newAdminTokenURI != conf.AdminDNS.AdminToken {
 			conf.AdminDNS.AdminToken = newAdminTokenURI
@@ -490,7 +509,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			if id, ok := strings.CutPrefix(apiToken, "vault://"); ok {
 				apiToken = conf.TabVault.Get(id)
 			}
-			issuerConfMap[domain] = &ACMEDNS{
+			lc.issuerConfMap[domain] = &ACMEDNS{
 				DNSProvider: &duckdns.Provider{
 					APIToken: apiToken,
 				},
@@ -508,7 +527,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		// note: to stop managing a certificate:
 		// lc.certmagicCache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: domain}})
 
-		if acmeConf, hasDNSConf := issuerConfMap[domain]; hasDNSConf {
+		if acmeConf, hasDNSConf := lc.issuerConfMap[domain]; hasDNSConf {
 			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (DNS config)\n", domain)
 			// note: would be better to have certmagic per-provider, maybe
 			magic := lc.newCertmagic(acmeConf.DNSProvider)
@@ -600,7 +619,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 				// https://cs.opensource.google/go/go/+/refs/tags/go1.24.3:src/crypto/tls/cipher_suites.go;l=56
 				// hasAES := cpu.X86.HasAES || cpu.ARM64.HasAES || cpu.ARM.HasAES || cpu.S390X.HasAES || cpu.RISCV64.HasZvkn
 				transport.TLSClientConfig = &tls.Config{}
-				if backend.ConnectInsecure {
+				if backend.SkipTLSVerify {
 					transport.TLSClientConfig.InsecureSkipVerify = true
 				}
 				proxy.Transport = transport
@@ -817,6 +836,13 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 }
 
 func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("%#v\n", r)
+			log.Println(string(debug.Stack()))
+		}
+	}()
+
 	fmt.Fprintf(os.Stderr, "\n")
 
 	var snialpn SNIALPN
@@ -843,8 +869,17 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			if alpns[0] == acmez.ACMETLS1Protocol {
+				fmt.Println("DEBUG handling acme ALPN challenge")
 				// note: certmagicConfMap only holds backends that terminate
 				magic := lc.certmagicConfMap[domain]
+				if magic == nil {
+					lc.slowConfigMu.RLock()
+					_, ok := lc.slowCertmagicConfMap[domain]
+					lc.slowConfigMu.RUnlock()
+					if ok {
+						magic = lc.certmagicTLSALPNOnly
+					}
+				}
 				if magic == lc.certmagicTLSALPNOnly {
 					snialpn = NewSNIALPN(domain, alpns[0])
 					_ = wconn.Passthru()
@@ -863,6 +898,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					snialpn = NewSNIALPN(domain, alpns[1])
 					mcfg, exists = lc.configBySNIALPN[snialpn]
 				}
+
 				// unhappy path
 				if !exists {
 					trackMismatch := func() {
@@ -877,7 +913,8 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					}
 
 					var err error
-					snialpn, mcfg, err = lc.slowMatch(domain, alpns)
+					snialpn, mcfg, err = lc.slowMatchService(&conf, domain, alpns)
+					fmt.Printf("DEBUG slowMatch %s: %#v, %#v\n", snialpn, mcfg, err)
 					if err != nil {
 						if !slices.Contains(conf.AdminDNS.Domains, domain) {
 							trackMismatch()
@@ -908,6 +945,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 						if lc.certmagicConfMap[domain] == nil {
 							return nil, fmt.Errorf("SANITY FAIL: missing ACME config for domain %q", domain)
 						}
+						fmt.Printf("DEBUG certmagic: %s %#v", clientALPN, lc.certmagicConfMap[domain])
 						return &tls.Config{
 							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
 							NextProtos:     []string{clientALPN},
@@ -963,7 +1001,18 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				return nil, ErrDoNotTerminate
 			}
 
-			fmt.Println("DEBUG: passthru (TERMINATE THE TLS!!)", domain, lc.certmagicConfMap[domain])
+			magic := lc.certmagicConfMap[domain]
+			if magic == nil {
+				lc.slowConfigMu.RLock()
+				if _, ok := lc.slowCertmagicConfMap[domain]; ok {
+					magic = lc.certmagicTLSALPNOnly
+				}
+				lc.slowConfigMu.RUnlock()
+				if magic == nil {
+					return nil, fmt.Errorf("SANITY FAIL: found backend but missing ACME config for %q", domain)
+				}
+			}
+			fmt.Println("DEBUG: passthru (TERMINATE THE TLS!!)", domain, magic)
 			_ = wconn.Passthru()
 
 			// TODO check snialpn support wildcards via config
@@ -971,13 +1020,14 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			// TODO preconfigure as map on load
 			return &tls.Config{
 				// Certificates: []tls.Certificate{*tlsCert},
-				GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
+				GetCertificate: magic.GetCertificate,
 				NextProtos:     []string{snialpn.ALPN()},
 			}, nil
 		},
 	})
 
 	terminate := true
+	fmt.Printf("DEBUG tlsConn %#v\n", tlsConn)
 	if err := tlsConn.Handshake(); err != nil {
 		if !errors.Is(err, ErrDoNotTerminate) {
 			var errNoTLSConf ErrorNoTLSConfig
@@ -1199,8 +1249,28 @@ func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", backendAddr)
 }
 
-func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *ConfigService, error) {
-	parentDomain := domain
+// slowMatch handles non-static matches - such as ip-as-hostname, wildcard, and CNAME/SRV records
+func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []string) (SNIALPN, *ConfigService, error) {
+	{
+		var mcfg *ConfigService
+		var exists bool
+		snialpn := NewSNIALPN(domain, alpns[0])
+
+		lc.slowConfigMu.RLock()
+		if mcfg, exists = lc.slowConfigBySNIALPN[snialpn]; exists {
+			lc.slowConfigMu.RUnlock()
+			return snialpn, mcfg, nil
+		}
+		if len(alpns) > 1 {
+			// still happy path, e.g. "example.com:http/1.1"
+			snialpn = NewSNIALPN(domain, alpns[1])
+			mcfg, exists = lc.slowConfigBySNIALPN[snialpn]
+		}
+		lc.slowConfigMu.RUnlock()
+		if exists {
+			return snialpn, mcfg, nil
+		}
+	}
 
 	// we already checked the first two, if any
 	if len(alpns) > 2 {
@@ -1218,31 +1288,218 @@ func (lc *ListenConfig) slowMatch(domain string, alpns []string) (SNIALPN, *Conf
 		}
 	}
 
+	// treating ".example.com" is a wildcard
+	subDomain := domain
 	for {
-		nextDot := strings.IndexByte(domain, '.')
+		nextDot := strings.IndexByte(subDomain, '.')
 		if nextDot == -1 {
-			return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
-				"no tls config matched for domain %q to backend for any of %q",
-				parentDomain,
-				strings.Join(alpns, ", "),
-			))
+			break
 		}
 
-		domain = domain[nextDot:]
-		knownAlpns := lc.alpnsByDomain[domain]
+		subDomain = subDomain[nextDot:]
+		knownAlpns := lc.alpnsByDomain[subDomain]
 		for _, alpn := range alpns {
 			if slices.Contains(knownAlpns, alpn) {
-				snialpn := NewSNIALPN(domain, alpn)
+				snialpn := NewSNIALPN(subDomain, alpn)
 				return snialpn, lc.configBySNIALPN[snialpn], nil
 			}
 		}
-		if slices.Contains(knownAlpns, "*") {
-			snialpn := NewSNIALPN(domain, "*")
+		isWild := slices.Contains(knownAlpns, "*")
+		if isWild {
+			snialpn := NewSNIALPN(subDomain, "*")
 			return snialpn, lc.configBySNIALPN[snialpn], nil
 		}
 
-		domain = domain[1:]
+		subDomain = subDomain[1:]
 	}
+
+	// SNIALPN, *ConfigService, error
+	snialpn, srvConf, err := lc.getOrCreateHostConfig(conf, domain, alpns)
+	if err == nil {
+		return snialpn, srvConf, nil
+	} else if err != errTryNext {
+		return "", nil, err
+	}
+
+	return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
+		"no tls config matched for domain %q to backend for any of %q",
+		domain,
+		strings.Join(alpns, ", "),
+	))
+
+	// TODO net.LookupSRV("")
+}
+
+// check for ip-in-hostname
+func (lc *ListenConfig) getOrCreateHostConfig(
+	conf *Config,
+	domain string,
+	alpns []string,
+) (SNIALPN, *ConfigService, error) {
+	ip, terminate, err := lc.getAllowedIP(conf, domain)
+	if err != nil {
+		return "", nil, err
+	}
+	// use standard ports for servers that natively handle internet traffic via TLS
+	rawPortMap := map[string]uint16{
+		"http/1.1":    443,
+		"h2":          443,
+		"ssh":         44322, // non-standard
+		"acme-tls/1":  443,
+		"coap":        5684,
+		"dicom":       2762,
+		"dot":         853,
+		"ftp":         990,
+		"imap":        993,
+		"irc":         6697,
+		"managesieve": 4190,
+		"mqtt":        8883,
+		"nntp":        563,
+		"ntske/1":     4460,
+		"pop3":        995,
+		"postgresql":  5432,
+		"tds/8.0":     1433,
+		"radius/1.0":  2083,
+		"radius/1.1":  2083,
+		"sip":         5061,
+		"smb":         10445, // non-standard
+		"webrtc":      443,
+		"c-webrtc":    443,
+		"xmpp-client": 5223, // direct tls is legacy ??
+		"xmpp-server": 5270, // direct tls is legacy ??
+	}
+	// use mostly non-standard ports to prevent accidental access
+	terminatedPortMap := map[string]uint16{
+		"http/1.1":    3080, // non-standard, non-conflict
+		"h2c":         3080, // non-standard, testing only
+		"ssh":         22,   // requires sclient
+		"coap":        15683,
+		"dicom":       10104,
+		"dot":         10053,
+		"ftp":         10021,
+		"imap":        10143,
+		"irc":         16667,
+		"managesieve": 14190,
+		"mqtt":        11883,
+		"nntp":        10119,
+		"ntske/1":     10123,
+		"pop3":        10110,
+		"postgresql":  15432,
+		"tds/8.0":     11433,
+		"radius/1.0":  12083,
+		"radius/1.1":  12083,
+		"sip":         15060,
+		"smb":         10445, // requires sclient
+		"webrtc":      10080,
+		"c-webrtc":    10080,
+		"xmpp-client": 15222,
+		"xmpp-server": 15269,
+	}
+
+	// Determine primary ALPN (use http/1.1 if h2 is provided but http/1.1 is not)
+	var selectedPort uint16
+	var selectedALPN string
+	if terminate {
+		for _, alpn := range alpns {
+			if port, ok := terminatedPortMap[alpn]; ok {
+				selectedALPN = alpn
+				selectedPort = port
+			}
+		}
+	} else {
+		for _, alpn := range alpns {
+			if port, ok := rawPortMap[alpn]; ok {
+				selectedALPN = alpn
+				selectedPort = port
+			}
+		}
+	}
+	if selectedALPN == "h2" {
+		selectedALPN = "http/1.1"
+	}
+	if selectedALPN == "" {
+		return "", nil, fmt.Errorf("no supported ALPN provided: %v", alpns)
+	}
+
+	// Create backend configuration
+	serviceSlug := strings.ReplaceAll(domain, ".", "-") + "-" + strings.Split(selectedALPN, "/")[0]
+	backend := Backend{
+		Slug:          fmt.Sprintf("%s--%s", strings.ReplaceAll(ip.String(), ".", "-"), strings.Split(selectedALPN, "/")[0]),
+		Host:          ip.String() + ":" + strconv.Itoa(int(selectedPort)),
+		Address:       ip.String(),
+		Port:          selectedPort,
+		TerminateTLS:  terminate,
+		ConnectTLS:    false,
+		SkipTLSVerify: false,
+	}
+
+	// TODO check that a backend exists here
+	// (any cached slowMatchConfig should do since what triggers that triggers this)
+
+	// Create service configuration
+	service := &ConfigService{
+		Slug:                   serviceSlug,
+		Domains:                []string{domain},
+		ALPNs:                  []string{selectedALPN},
+		Backends:               []Backend{backend},
+		CurrentBackend:         new(atomic.Uint32), // TODO make NewConfigService for this
+		AllowedClientHostnames: []string{},
+	}
+	snialpn := NewSNIALPN(domain, selectedALPN)
+
+	lc.slowConfigMu.Lock()
+	// TODO needs to be able to expire
+	lc.slowCertmagicConfMap[domain] = struct{}{}
+	lc.slowConfigBySNIALPN[snialpn] = service
+	lc.slowConfigMu.Unlock()
+	if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
+		return "", nil, err
+	}
+
+	return snialpn, service, nil
+}
+
+func (lc *ListenConfig) getAllowedIP(
+	conf *Config,
+	domain string,
+) (net.IP, bool, error) {
+	if len(conf.Networks) == 0 {
+		fmt.Printf("DEBUG: NO networks!!\n")
+		return nil, false, errTryNext
+	}
+
+	terminate := strings.HasPrefix(domain, "tls-")
+	if !terminate && !strings.HasPrefix(domain, "tcp-") {
+		return nil, false, errTryNext
+	}
+
+	var ip net.IP
+	{
+		labelEnd := strings.IndexByte(domain, '.')
+		if labelEnd == -1 || len(domain) <= 6 {
+			return nil, false, errTryNext
+		}
+		ipAddr := domain[4:labelEnd]
+		sld := domain[1+labelEnd:]
+		ipAddr = strings.ReplaceAll(ipAddr, "-", ".")
+		ip = net.ParseIP(ipAddr)
+		if ip == nil {
+			return nil, false, errTryNext
+		}
+
+		if conf.IPDomain != sld {
+			return nil, false, errTryNext
+		}
+	}
+
+	for _, ipNet := range conf.Networks {
+		if ipNet.Contains(ip) {
+			fmt.Printf("DEBUG: found network %#v\n", ipNet)
+			return ip, terminate, nil
+		}
+		fmt.Printf("DEBUG: no match for %#v in network %#v\n", ip, ipNet)
+	}
+	return nil, false, ErrUnknownNetwork
 }
 
 func newWrappedConn(conn net.Conn) *wrappedConn {
