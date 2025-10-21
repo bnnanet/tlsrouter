@@ -27,6 +27,10 @@ github.com/miekg/dns
 # github.com/pires/go-proxyproto v0.8.1
 ## explicit; go 1.24
 github.com/pires/go-proxyproto
+# github.com/therootcompany/golib/io/transform/gsheet2csv v1.0.3
+## explicit; go 1.24.6
+github.com/therootcompany/golib/io/transform/gsheet2csv
+github.com/therootcompany/golib/io/transform/gsheet2csv/cmd/gsheet2csv
 # github.com/zeebo/blake3 v0.2.4
 ## explicit; go 1.18
 github.com/zeebo/blake3
