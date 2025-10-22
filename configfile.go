@@ -170,7 +170,7 @@ func LintConfig(conf *Config, allowedAlpns []string) error {
 			}
 
 			if len(srv.Backends) == 0 {
-				fmt.Fprintf(os.Stderr, "warn: domains+alpns set %q have no 'backends' defined", snialpns)
+				fmt.Fprintf(os.Stderr, "warn: domains+alpns set %q have no 'backends' defined\n", snialpns)
 			}
 
 			for i, b := range srv.Backends {
@@ -379,11 +379,11 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 		// Create backend if address and port are provided
 		if backendSlug != "" {
 			backend := Backend{
-				Slug:            backendSlug,
-				Address:         backendAddress,
-				Port:            port,
-				TerminateTLS:    terminateTLS,
-				ConnectTLS:      connectTLS,
+				Slug:          backendSlug,
+				Address:       backendAddress,
+				Port:          port,
+				TerminateTLS:  terminateTLS,
+				ConnectTLS:    connectTLS,
 				SkipTLSVerify: connectInsecure,
 			}
 			service.Backends = append(service.Backends, backend)
@@ -423,7 +423,7 @@ type CSVRecord struct {
 	BackendPort            uint16
 	TerminateTLS           bool
 	ConnectTLS             bool
-	SkipTLSVerify        bool
+	SkipTLSVerify          bool
 	AllowedClientHostnames string
 }
 
@@ -454,7 +454,7 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 							BackendPort:            backend.Port,
 							TerminateTLS:           backend.TerminateTLS,
 							ConnectTLS:             backend.ConnectTLS,
-							SkipTLSVerify:        backend.SkipTLSVerify,
+							SkipTLSVerify:          backend.SkipTLSVerify,
 							AllowedClientHostnames: strings.Join(service.AllowedClientHostnames, ";"),
 						})
 					}

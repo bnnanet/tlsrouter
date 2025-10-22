@@ -358,9 +358,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 	if len(conf.AdminDNS.API) == 0 ||
 		len(conf.AdminDNS.APIToken) == 0 ||
 		conf.AdminDNS.Disabled {
-		fmt.Fprintf(
-			os.Stderr,
-			"[warn] no ACME config for (internal) admin domains %s\n",
+		fmt.Fprintf(os.Stderr, "[warn] no ACME config for (internal) admin domains %s\n",
 			strings.Join(conf.AdminDNS.Domains, ", "),
 		)
 	} else {
@@ -408,12 +406,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 		for _, dnsConf := range app.DNSProviders {
 			kindOfThing, exists := appSlugs[dnsConf.Slug]
 			if exists {
-				fmt.Fprintf(
-					os.Stderr,
-					"conflicting duplicate slug %q, already used by %q\n",
-					dnsConf.Slug,
-					kindOfThing,
-				)
+				fmt.Fprintf(os.Stderr, "[warn] conflicting duplicate slug %q, already used by %q\n",
+					dnsConf.Slug, kindOfThing)
 			} else {
 				appSlugs[dnsConf.Slug] = "DNSConfig"
 			}
@@ -425,12 +419,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 				wildDNSConf = &dnsConf
 				continue
 			}
-			fmt.Fprintf(
-				os.Stderr,
-				"ignoring duplicate wildcard DNS provider %q, already provided by %q\n",
-				dnsConf.Slug,
-				wildDNSConf.Slug,
-			)
+			fmt.Fprintf(os.Stderr, "[warn] ignoring duplicate wildcard DNS provider %q, already provided by %q\n",
+				dnsConf.Slug, wildDNSConf.Slug)
 		}
 
 		for _, dnsConf := range app.DNSProviders {
@@ -445,19 +435,12 @@ func NewListenConfig(conf Config) *ListenConfig {
 						if oldDNSConf == emptyDNSConf {
 							continue
 						}
-						fmt.Fprintf(
-							os.Stderr,
-							"ignoring domain exclude for %q which is included by %q\n",
-							xdomain,
-							oldDNSConf.Slug,
-						)
+						fmt.Fprintf(os.Stderr, "[warn] ignoring domain exclude for %q which is included by %q\n",
+							xdomain, oldDNSConf.Slug)
 					}
 				} else {
-					fmt.Fprintf(
-						os.Stderr,
-						"ignoring 'excluded_domains' for non-wildcard dns provider %q\n",
-						dnsConf.Slug,
-					)
+					fmt.Fprintf(os.Stderr, "[warn] ignoring 'excluded_domains' for non-wildcard dns provider %q\n",
+						dnsConf.Slug)
 				}
 			}
 			for _, domain := range dnsConf.Domains {
@@ -467,25 +450,16 @@ func NewListenConfig(conf Config) *ListenConfig {
 					continue
 				}
 				if oldDNSConf == emptyDNSConf {
-					fmt.Fprintf(
-						os.Stderr,
-						"ignoring domain exclude for %q which is included by %q\n",
-						domain,
-						dnsConf.Slug,
-					)
+					fmt.Fprintf(os.Stderr, "[warn] ignoring domain exclude for %q which is included by %q\n",
+						domain, dnsConf.Slug)
 					dnsConfByDomain[domain] = &dnsConf
 				}
 				if oldDNSConf.API == dnsConf.API &&
 					oldDNSConf.APIToken == dnsConf.APIToken {
 					continue
 				}
-				fmt.Fprintf(
-					os.Stderr,
-					"duplicate dns provider for %q: %q (selected), %q (ignored)\n",
-					domain,
-					oldDNSConf.Slug,
-					dnsConf.Slug,
-				)
+				fmt.Fprintf(os.Stderr, "[warn] duplicate dns provider for %q: %q (selected), %q (ignored)\n",
+					domain, oldDNSConf.Slug, dnsConf.Slug)
 			}
 		}
 
@@ -528,7 +502,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		// lc.certmagicCache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: domain}})
 
 		if acmeConf, hasDNSConf := lc.issuerConfMap[domain]; hasDNSConf {
-			fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for %q (DNS config)\n", domain)
+			fmt.Fprintf(os.Stderr, "   DEBUG: %s: TLS will terminate as per DNS config\n", domain)
 			// note: would be better to have certmagic per-provider, maybe
 			magic := lc.newCertmagic(acmeConf.DNSProvider)
 			lc.certmagicConfMap[domain] = magic
@@ -536,7 +510,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			return magic.ManageSync(lc.Context, []string{domain})
 		}
 
-		fmt.Fprintf(os.Stderr, "   DEBUG: will terminate TLS for domain %q (TLS-ALPN)\n", domain)
+		fmt.Fprintf(os.Stderr, "   DEBUG: %s: TLS will terminate with TLS-ALPN\n", domain)
 		lc.certmagicConfMap[domain] = lc.certmagicTLSALPNOnly
 		return lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain})
 	}
@@ -560,7 +534,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 			domain := snialpn.SNI()
 			if err := registerACMEDomain(domain); err != nil {
-				fmt.Fprintf(os.Stderr, "could not add %q to the allowlist: %s\n", domain, err)
+				fmt.Fprintf(os.Stderr, "SANITY FAIL: %s: could not register for ACME: %#v\n", domain, err)
 				continue
 			}
 
@@ -570,7 +544,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			}
 
 			alpn := snialpn.ALPN()
-			fmt.Fprintf(os.Stderr, "DEBUG: incoming snialpn %s", alpn)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: incoming snialpn %s\n", domain, alpn)
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
 				backend.HTTPTunnel = tun.NewListener(lc.Context)
 
@@ -804,7 +778,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 				if errors.Is(err, net.ErrClosed) {
 					break
 				}
-				fmt.Fprintf(os.Stderr, "debug: error accepting client: %s\n", err)
+				fmt.Fprintf(os.Stderr, "DEBUG: (new): couldn't accept client: %#v\n", err)
 				continue
 			}
 
@@ -815,7 +789,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 	for {
 		select {
 		case conn := <-ch:
-			fmt.Fprintf(os.Stderr, "debug: accepted connection: %v\n", conn.RemoteAddr())
+			fmt.Fprintf(os.Stderr, "\nDEBUG: (new): accepted %s\n", conn.RemoteAddr())
 			go func() {
 				_, _, err = lc.proxy(conn)
 				if err != nil {
@@ -826,7 +800,8 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 		case <-lc.Context.Done():
 			lc.done <- context.Background()
 		case <-lc.done:
-			fmt.Fprintf(os.Stderr, "\n[[[[debug: stop server]]]]\n\n")
+			// TODO put an id or total uptime some such
+			fmt.Fprintf(os.Stderr, "\n\nINFO: server shutting down...\n\n")
 			// TODO hard close Conn
 			_ = lc.netLn.Close()
 			_ = lc.adminServer.Close()
@@ -838,12 +813,10 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("%#v\n", r)
+			log.Printf("\nRUNTIME:  %#v", r)
 			log.Println(string(debug.Stack()))
 		}
 	}()
-
-	fmt.Fprintf(os.Stderr, "\n")
 
 	var snialpn SNIALPN
 	var beConn net.Conn
@@ -859,17 +832,18 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			conf := lc.LoadConfig()
 
-			fmt.Fprintf(os.Stderr, "ServerName (SNI): %s\n", hello.ServerName)
-			fmt.Fprintf(os.Stderr, "SupportedProtos (ALPN): %s\n", hello.SupportedProtos)
+			fmt.Fprintf(os.Stderr, "DEBUG: (new): ServerName (SNI): %q\n", hello.ServerName)
+			fmt.Fprintf(os.Stderr, "DEBUG: (new): SupportedProtos (ALPN): %q\n", strings.Join(hello.SupportedProtos, ", "))
 
 			domain := strings.ToLower(hello.ServerName)
 			alpns := hello.SupportedProtos
 			if len(alpns) == 0 {
+				fmt.Fprintf(os.Stderr, "DEBUG: (new): assuming http/1.1\n")
 				alpns = append(alpns, "http/1.1")
 			}
 
 			if alpns[0] == acmez.ACMETLS1Protocol {
-				fmt.Println("DEBUG handling acme ALPN challenge")
+				fmt.Fprintf(os.Stderr, "DEBUG: %s: handling acme ALPN challenge\n", domain)
 				// note: certmagicConfMap only holds backends that terminate
 				magic := lc.certmagicConfMap[domain]
 				if magic == nil {
@@ -885,8 +859,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					_ = wconn.Passthru()
 					return magic.TLSConfig(), nil
 				}
-				snialpn = ""
-				return nil, fmt.Errorf("TLSALPN challenge for unknown domain %q", domain)
+
+				// TODO how can we check if this instance of magic cert should handle this or not?
+				fmt.Fprintf(os.Stderr, "DEBUG: %s>%s: ACME TLS-ALPN falls through (no termination found)\n", domain, alpns[0])
 			}
 
 			// happy path, e.g. "example.com:h2"
@@ -914,11 +889,14 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 					var err error
 					snialpn, mcfg, err = lc.slowMatchService(&conf, domain, alpns)
-					fmt.Printf("DEBUG slowMatch %s: %#v, %#v\n", snialpn, mcfg, err)
+					if err == nil {
+						fmt.Fprintf(os.Stderr, "DEBUG: %s: slowMatch: %s, %d backends\n", snialpn, strings.Join(mcfg.Domains, ", "), len(mcfg.Backends))
+					}
 					if err != nil {
+						snialpn = NewSNIALPN(domain, alpns[0])
+						fmt.Fprintf(os.Stderr, "DEBUG: %s>%s: slowMatch err: %#v\n", domain, alpns[0], err)
 						if !slices.Contains(conf.AdminDNS.Domains, domain) {
 							trackMismatch()
-							snialpn = ""
 							return nil, err
 						}
 
@@ -932,20 +910,18 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 						}
 						if len(clientALPN) == 0 {
 							trackMismatch()
-							snialpn = ""
 							return nil, err
 						}
 
-						snialpn = NewSNIALPN(domain, alpns[0])
 						backend = &Backend{
 							TerminateTLS: true,
 							HTTPTunnel:   lc.adminTunnel,
 						}
 						_ = wconn.Passthru()
 						if lc.certmagicConfMap[domain] == nil {
-							return nil, fmt.Errorf("SANITY FAIL: missing ACME config for domain %q", domain)
+							return nil, fmt.Errorf("SANITY FAIL: %s: missing ACME config", snialpn)
 						}
-						fmt.Printf("DEBUG certmagic: %s %#v", clientALPN, lc.certmagicConfMap[domain])
+						fmt.Fprintf(os.Stderr, "DEBUG: %s: returning tls.Config with admin certmagic m.GetCertificate\n", snialpn)
 						return &tls.Config{
 							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
 							NextProtos:     []string{clientALPN},
@@ -955,7 +931,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			for i, b := range mcfg.Backends {
-				fmt.Printf("\n\nDEBUG mcfg.Backend[%d]: %#v\n", i, b)
+				fmt.Printf("DEBUG: %s: mcfg.Backends[%d]: ALPNs: %s, Host: %s, Address: %s, Port %d, Terminate %t, PROXY %d\n",
+					snialpn, i,
+					strings.Join(b.ALPNs, ", "), b.Host, b.Address, b.Port, b.TerminateTLS, b.PROXYProto)
 			}
 
 			var inc uint32 = 1
@@ -978,7 +956,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				if err != nil {
 					// TODO mark as inactive and try next
 					//backend = nil
-					fmt.Fprintf(os.Stderr, "could not connect to backend %q\n", b.Host)
+					fmt.Fprintf(os.Stderr, "DEBUG: %s: could not connect to backend %q\n", snialpn, b.Host)
 				}
 
 				usesTunnel := b.HTTPTunnel != nil
@@ -997,7 +975,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			}
 
 			if !backend.TerminateTLS {
-				fmt.Println("DEBUG: No terminate TLS...")
+				fmt.Fprintf(os.Stderr, "DEBUG: %s: GetConfigForClient: ErrDoNotTerminate\n", snialpn)
 				return nil, ErrDoNotTerminate
 			}
 
@@ -1009,15 +987,12 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				}
 				lc.slowConfigMu.RUnlock()
 				if magic == nil {
-					return nil, fmt.Errorf("SANITY FAIL: found backend but missing ACME config for %q", domain)
+					return nil, fmt.Errorf("SANITY FAIL: %s: found backend but missing ACME config", snialpn)
 				}
 			}
-			fmt.Println("DEBUG: passthru (TERMINATE THE TLS!!)", domain, magic)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: GetConfigForClient: return tls.Config with cached certmagic m.GetCertificate\n", snialpn)
 			_ = wconn.Passthru()
 
-			// TODO check snialpn support wildcards via config
-			// TODO get the cert directly
-			// TODO preconfigure as map on load
 			return &tls.Config{
 				// Certificates: []tls.Certificate{*tlsCert},
 				GetCertificate: magic.GetCertificate,
@@ -1027,37 +1002,36 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	})
 
 	terminate := true
-	fmt.Printf("DEBUG tlsConn %#v\n", tlsConn)
 	if err := tlsConn.Handshake(); err != nil {
 		if !errors.Is(err, ErrDoNotTerminate) {
 			var errNoTLSConf ErrorNoTLSConfig
 			if errors.As(err, &errNoTLSConf) {
 				// TODO error log channel
-				log.Printf("no tls config: %s", err)
+				fmt.Fprintf(os.Stderr, "DEBUG: %s: no tls config: %s\n", snialpn, err)
 				return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), err
 			}
 
 			// TODO error log channel
-			log.Printf("unknown tls handshake failure: %v: %s", conn.RemoteAddr(), err)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: unknown tls handshake failure: %v: %#v\n", snialpn, conn.RemoteAddr(), err)
 			return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), err
 		}
 
 		terminate = false
 	} else if backend == nil {
 		if snialpn.SNI() == acmez.ACMETLS1Protocol {
-			fmt.Println("solve(d)? TLS ALPN...")
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: %#v ended TLS session without backend (possibly solving ACME TLS-ALPN)\n", snialpn, conn.RemoteAddr())
 			return
 		}
 	}
 	if backend == nil {
 		// TODO this is panic-worthy (leaving in for testing)
-		fmt.Println("no backend for sni:alpn=", snialpn)
+		fmt.Fprintf(os.Stderr, "SANITY FAIL: %s: backend became nil\n", snialpn)
 		return
 	}
 
-	fmt.Println("DEBUG: handle with selected backend...")
+	fmt.Fprintf(os.Stderr, "DEBUG: %s: handle with selected backend %s\n", snialpn, backend.Host)
 	if backend.PROXYProto == 1 || backend.PROXYProto == 2 {
-		fmt.Println("PROXY PROTO...")
+		fmt.Fprintf(os.Stderr, "DEBUG: %s: PROXY PROTO...\n", snialpn)
 		header := &proxyproto.Header{
 			Version:           byte(backend.PROXYProto),
 			Command:           proxyproto.PROXY,
@@ -1072,29 +1046,30 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 	wconn.SNIALPN = snialpn
 	if terminate {
-		fmt.Println("DEBUG 1a: PLAIN CONN...")
-		cConn := NewPlainConn(tlsConn)
-		wconn.PlainConn = cConn
+		fmt.Fprintf(os.Stderr, "DEBUG: %s: wconn.PlainConn = NewPlainConn(tlsConn)\n", snialpn)
+		wconn.PlainConn = NewPlainConn(tlsConn)
 	}
 
+	fmt.Fprintf(os.Stderr, "DEBUG: %s: connection stored as %s\n", snialpn, wconn.ConnID())
 	lc.Conns.Store(wconn.ConnID(), wconn)
 
 	if !terminate {
-		fmt.Println("DEBUG 1b: No terminate TLS...")
 		if beConn != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: HAND-OFF (Non-Terminating, TCP Tunnel)\n", snialpn)
 			return wconn.tunnelTCPConn(beConn)
 		}
+		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLED (Non-Terminating, Bad Gateway)\n", snialpn)
 		return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), fmt.Errorf("bad gateway: no active backend available")
 	}
 
 	if backend.HTTPTunnel != nil {
-		fmt.Println("backend.HTTPTunnel.Inject")
+		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLING > backend.HTTPTunnel.Inject\n", snialpn)
 		// doesn't block
 		retErr = backend.HTTPTunnel.Inject(wconn.PlainConn)
 		wconn.wg.Wait()
 	} else if beConn != nil {
-		fmt.Println("TunnelTCPConn(cConn, beConn)")
-		_, _, retErr = TunnelTCPConn(wconn.PlainConn, beConn)
+		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLING > TunnelTCPConn(cConn, beConn)\n", snialpn)
+		_, _, retErr = TunnelTCPConn(snialpn, wconn.PlainConn, beConn)
 		_ = conn.Close()
 	} else {
 		// TODO
@@ -1105,15 +1080,14 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		text := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", n, msg)
 		_, _ = wconn.PlainConn.Write([]byte(text))
 		_ = conn.Close()
-		fmt.Println("DEBUG: bad gateway")
-
+		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLED > Bad Gateway (Terminated)\n", snialpn)
 	}
-	fmt.Println("DEBUG: closed")
+	fmt.Fprintf(os.Stderr, "DEBUG: %s: CLOSED\n", snialpn)
 	return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), retErr
 }
 
 // TunnelTCPConn is a bi-directional copy, calling io.Copy for both connections
-func TunnelTCPConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr error) {
+func TunnelTCPConn(snialpn SNIALPN, cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr error) {
 	var rErr error
 	var wErr error
 
@@ -1138,7 +1112,7 @@ func TunnelTCPConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr er
 		r, err = io.Copy(beConn, cConn)
 		if err != nil {
 			rErr = err
-			fmt.Fprintf(os.Stderr, "debug: error copying client to backend: %v\n", err)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: Plain Tunnel: error copying client>backend: %v\n", snialpn, err)
 		}
 
 		if c, ok := beConn.(*net.TCPConn); ok {
@@ -1153,7 +1127,7 @@ func TunnelTCPConn(cConn net.Conn, beConn net.Conn) (r int64, w int64, retErr er
 		w, err = io.Copy(cConn, beConn)
 		if err != nil {
 			wErr = err
-			fmt.Fprintf(os.Stderr, "debug: error copying backend to client: %v\n", err)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: Plain Tunnel: error copying backend>client: %v\n", snialpn, err)
 		}
 
 		if c, ok := cConn.(*net.TCPConn); ok {
@@ -1197,7 +1171,7 @@ func (wconn *wrappedConn) tunnelTCPConn(beConn net.Conn) (r int64, w int64, retE
 
 		_, err := io.Copy(beConn, conn)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "debug: error copying client to backend: %v\n", err)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: Raw Tunnel: error copying client>backend: %v\n", wconn.SNIALPN, err)
 		}
 
 		if c, ok := beConn.(*net.TCPConn); ok {
@@ -1210,7 +1184,7 @@ func (wconn *wrappedConn) tunnelTCPConn(beConn net.Conn) (r int64, w int64, retE
 
 		_, err := io.Copy(conn, beConn)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "debug: error copying backend to client: %v\n", err)
+			fmt.Fprintf(os.Stderr, "DEBUG: %s: Raw Tunnel: error copying backend>client: %v\n", wconn.SNIALPN, err)
 		}
 
 		if c, ok := conn.(*net.TCPConn); ok {
