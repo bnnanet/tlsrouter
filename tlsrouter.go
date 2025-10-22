@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,8 +37,8 @@ import (
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
-var ErrUnknownNetwork = fmt.Errorf("the target ip is not part of a known network")
-var errTryNext = fmt.Errorf("no worries, carry on")
+
+var debugMux sync.Mutex
 
 var HTTPFamilyALPNs = []string{
 	"h3",
@@ -73,6 +72,7 @@ type Config struct {
 	certmagicStorage      certmagic.Storage  `json:"-"`
 	Networks              []net.IPNet        `json:"dynamic_host_networks"`
 	IPDomain              string             `json:"dynamic_ip_domain"`
+	IPs                   []net.IP           `json:"-"`
 }
 
 // ShortSHA2 is not safe for use after atomic Store()
@@ -1328,178 +1328,6 @@ func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []st
 	))
 
 	// TODO net.LookupSRV("")
-}
-
-// check for ip-in-hostname
-func (lc *ListenConfig) getOrCreateHostConfig(
-	conf *Config,
-	domain string,
-	alpns []string,
-) (SNIALPN, *ConfigService, error) {
-	ip, terminate, err := lc.getAllowedIP(conf, domain)
-	if err != nil {
-		return "", nil, err
-	}
-	// use standard ports for servers that natively handle internet traffic via TLS
-	rawPortMap := map[string]uint16{
-		"http/1.1":    443,
-		"h2":          443,
-		"ssh":         44322, // non-standard
-		"acme-tls/1":  443,
-		"coap":        5684,
-		"dicom":       2762,
-		"dot":         853,
-		"ftp":         990,
-		"imap":        993,
-		"irc":         6697,
-		"managesieve": 4190,
-		"mqtt":        8883,
-		"nntp":        563,
-		"ntske/1":     4460,
-		"pop3":        995,
-		"postgresql":  5432,
-		"tds/8.0":     1433,
-		"radius/1.0":  2083,
-		"radius/1.1":  2083,
-		"sip":         5061,
-		"smb":         10445, // non-standard
-		"webrtc":      443,
-		"c-webrtc":    443,
-		"xmpp-client": 5223, // direct tls is legacy ??
-		"xmpp-server": 5270, // direct tls is legacy ??
-	}
-	// use mostly non-standard ports to prevent accidental access
-	terminatedPortMap := map[string]uint16{
-		"http/1.1":    3080, // non-standard, non-conflict
-		"h2c":         3080, // non-standard, testing only
-		"ssh":         22,   // requires sclient
-		"coap":        15683,
-		"dicom":       10104,
-		"dot":         10053,
-		"ftp":         10021,
-		"imap":        10143,
-		"irc":         16667,
-		"managesieve": 14190,
-		"mqtt":        11883,
-		"nntp":        10119,
-		"ntske/1":     10123,
-		"pop3":        10110,
-		"postgresql":  15432,
-		"tds/8.0":     11433,
-		"radius/1.0":  12083,
-		"radius/1.1":  12083,
-		"sip":         15060,
-		"smb":         10445, // requires sclient
-		"webrtc":      10080,
-		"c-webrtc":    10080,
-		"xmpp-client": 15222,
-		"xmpp-server": 15269,
-	}
-
-	// Determine primary ALPN (use http/1.1 if h2 is provided but http/1.1 is not)
-	var selectedPort uint16
-	var selectedALPN string
-	if terminate {
-		for _, alpn := range alpns {
-			if port, ok := terminatedPortMap[alpn]; ok {
-				selectedALPN = alpn
-				selectedPort = port
-			}
-		}
-	} else {
-		for _, alpn := range alpns {
-			if port, ok := rawPortMap[alpn]; ok {
-				selectedALPN = alpn
-				selectedPort = port
-			}
-		}
-	}
-	if selectedALPN == "h2" {
-		selectedALPN = "http/1.1"
-	}
-	if selectedALPN == "" {
-		return "", nil, fmt.Errorf("no supported ALPN provided: %v", alpns)
-	}
-
-	// Create backend configuration
-	serviceSlug := strings.ReplaceAll(domain, ".", "-") + "-" + strings.Split(selectedALPN, "/")[0]
-	backend := Backend{
-		Slug:          fmt.Sprintf("%s--%s", strings.ReplaceAll(ip.String(), ".", "-"), strings.Split(selectedALPN, "/")[0]),
-		Host:          ip.String() + ":" + strconv.Itoa(int(selectedPort)),
-		Address:       ip.String(),
-		Port:          selectedPort,
-		TerminateTLS:  terminate,
-		ConnectTLS:    false,
-		SkipTLSVerify: false,
-	}
-
-	// TODO check that a backend exists here
-	// (any cached slowMatchConfig should do since what triggers that triggers this)
-
-	// Create service configuration
-	service := &ConfigService{
-		Slug:                   serviceSlug,
-		Domains:                []string{domain},
-		ALPNs:                  []string{selectedALPN},
-		Backends:               []Backend{backend},
-		CurrentBackend:         new(atomic.Uint32), // TODO make NewConfigService for this
-		AllowedClientHostnames: []string{},
-	}
-	snialpn := NewSNIALPN(domain, selectedALPN)
-
-	lc.slowConfigMu.Lock()
-	// TODO needs to be able to expire
-	lc.slowCertmagicConfMap[domain] = struct{}{}
-	lc.slowConfigBySNIALPN[snialpn] = service
-	lc.slowConfigMu.Unlock()
-	if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
-		return "", nil, err
-	}
-
-	return snialpn, service, nil
-}
-
-func (lc *ListenConfig) getAllowedIP(
-	conf *Config,
-	domain string,
-) (net.IP, bool, error) {
-	if len(conf.Networks) == 0 {
-		fmt.Printf("DEBUG: NO networks!!\n")
-		return nil, false, errTryNext
-	}
-
-	terminate := strings.HasPrefix(domain, "tls-")
-	if !terminate && !strings.HasPrefix(domain, "tcp-") {
-		return nil, false, errTryNext
-	}
-
-	var ip net.IP
-	{
-		labelEnd := strings.IndexByte(domain, '.')
-		if labelEnd == -1 || len(domain) <= 6 {
-			return nil, false, errTryNext
-		}
-		ipAddr := domain[4:labelEnd]
-		sld := domain[1+labelEnd:]
-		ipAddr = strings.ReplaceAll(ipAddr, "-", ".")
-		ip = net.ParseIP(ipAddr)
-		if ip == nil {
-			return nil, false, errTryNext
-		}
-
-		if conf.IPDomain != sld {
-			return nil, false, errTryNext
-		}
-	}
-
-	for _, ipNet := range conf.Networks {
-		if ipNet.Contains(ip) {
-			fmt.Printf("DEBUG: found network %#v\n", ipNet)
-			return ip, terminate, nil
-		}
-		fmt.Printf("DEBUG: no match for %#v in network %#v\n", ip, ipNet)
-	}
-	return nil, false, ErrUnknownNetwork
 }
 
 func newWrappedConn(conn net.Conn) *wrappedConn {

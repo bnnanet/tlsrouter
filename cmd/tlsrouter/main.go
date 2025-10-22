@@ -290,6 +290,13 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomain string, n
 	conf.TabVault = tabVault
 	conf.Networks = networks
 	conf.IPDomain = ipDomain
+	if len(conf.IPDomain) > 0 && !strings.HasSuffix(conf.IPDomain, ".local") {
+		conf.IPs, err = net.LookupIP(conf.IPDomain)
+		if err != nil {
+			return tlsrouter.Config{}, err
+		}
+	}
+	fmt.Printf("DEBUG resolved ip domain IPs: %#v", conf.IPs)
 
 	customAlpns := []string{"ssh"}
 	knownAlpns := ianaalpn.Names
