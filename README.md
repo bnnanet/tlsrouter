@@ -17,6 +17,58 @@ go run ./cmd/tlsrouter/ \
 Configured backends are loaded statically, while URLs like <https://tls-192-168-1-100.vm.example.com> are dynamically proxied -
 provided that the ip domain and ip-as-subdomain addresses match the allowed domain and networks.
 
+## DNS Authorization
+
+Sites are configured through DNS.
+
+### CNAME (for subdomains)
+
+Both `http/1.1` and `ssh` (terminated) can be enabled by setting a CNAME to the direct IP domain:
+
+```text
+# terminates https to 3080
+CNAME   site-a.whatever.com  tls-192-168-1-100.vm.example.net   300
+
+# proxies non-terminated to 443
+CNAME   site-a.whatever.com  tcp-192-168-1-100.vm.example.net   300
+```
+
+If you'd like to use a CNAME for convenience for multiple records, use `cname.<ip-domain>`, such as `cname.vm.example.net`.
+
+```text
+CNAME   sites.whatever.com               cname.vm.example.net   300
+```
+
+Note: all ports in the table below are public and you should bind to localhost or use a firewall if you wish to run things on those ports privately.
+
+### A + SRV (for apex domains)
+
+```text
+A                  whatever.com                              123.1.2.3  300
+SRV     _http._tcp.whatever.com     10 3080 tls-10-11-1-123.a.bnna.net  300 10
+SRV      _ssh._tcp.whatever.com     10   22 tls-10-11-1-123.a.bnna.net  300 10
+```
+
+Note: ports must be selected according to the table below. Arbitrary ports are not allowed for security reasons (anyone can set records on their domain to your IP address).
+
+### SRV (to enable more protocols)
+
+Whether using CNAME or A records, SRV records will enable additional proxying.
+
+```text
+SRV             _h2._tcp.whatever.com   10  443 tcp-10-11-1-123.a.bnna.net  300 10
+SRV     _postgresql._tcp.whatever.com   10 3080 tls-10-11-1-123.a.bnna.net  300 10
+```
+
+ALPN names can be translated to service names in one of two ways:
+
+1. replace all `.` (periods) with `-`, and replace `/` with `_`
+2. drop anything after `/` and replace all `.` (periods) with `-`
+
+For example: `http` and `http_1-1` are both valid for `http/1.1`
+
+Note: ports must be selected according to the table below. Arbitrary ports are not allowed for security reasons (anyone can set records on their domain to your IP address).
+
 ## Dynamic IP URL Mapping
 
 The URL pattern is There are two URL patterns:
