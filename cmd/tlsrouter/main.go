@@ -101,7 +101,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "warn: invalid PORT environment variable value: %s, using default or flag value\n", envPort)
 		}
 	}
-	mainFlags.IntVar(&port, "port", defaultPort, "Port to listen on")
+	mainFlags.IntVar(&port, "port", defaultPort, "TLS port to listen on. -1 to disable.")
+
+	// Check PLAIN_PORT environment variable, override default if set
+	var plainPort int
+	defaultPlainPort := 80
+	if envPlainPort := os.Getenv("PORT"); envPlainPort != "" {
+		if p, err := strconv.Atoi(envPlainPort); err == nil && p > 0 {
+			defaultPlainPort = p
+		} else {
+			fmt.Fprintf(os.Stderr, "warn: invalid PORT environment variable value: %s, using default or flag value\n", envPlainPort)
+		}
+	}
+	mainFlags.IntVar(&plainPort, "plain-port", defaultPlainPort, "Plain (HTTP) port to listen on (for redirects). -1 to disable.")
 
 	// Check BIND environment variable, override default if set
 	var bind string
@@ -173,6 +185,23 @@ func main() {
 		return
 	}
 
+	if plainPort >= 0 {
+		log.Printf("HTTP redirect listener starting on :80 → HTTPS (HTML meta)")
+		go func() {
+			plainAddr := fmt.Sprintf("%s:%d", bind, plainPort)
+			if err := tlsrouter.ListenAndRedirectPlainHTTP(plainAddr); err != http.ErrServerClosed {
+				log.Fatalf("HTTP redirect server error: %v", err)
+			}
+		}()
+		if port < 0 {
+			select {}
+		}
+	}
+	if port < 0 {
+		log.Printf("closing because neither --port nor --plain-port are positive")
+		return
+	}
+
 	// enabled dynamic ip networks
 	var networks []net.IPNet
 	var cidrs []string
@@ -203,6 +232,7 @@ func main() {
 	}
 
 	conf.SetSigChan(sigChan)
+
 	mux := http.NewServeMux()
 	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
