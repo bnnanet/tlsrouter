@@ -968,6 +968,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					// TODO mark as inactive and try next
 					//backend = nil
 					fmt.Fprintf(os.Stderr, "DEBUG: %s: could not connect to backend %q\n", snialpn, b.Host)
+					// fallthrough: try to the next backend
 				}
 
 				usesTunnel := b.HTTPTunnel != nil
@@ -979,6 +980,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					break
 				}
 
+				// TODO try the next backend
 				hideAlwaysTrueFromLinterWhileDeving := beConn == nil || beConn != nil
 				if hideAlwaysTrueFromLinterWhileDeving {
 					break
