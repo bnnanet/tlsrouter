@@ -95,6 +95,7 @@ func (lc *ListenConfig) getOrCreateHostConfig(
 ) (SNIALPN, *ConfigService, error) {
 	var selectedPort uint16
 	var selectedALPN string
+	var isSimpleDynamic bool
 
 	ip, terminate, selectedALPN, selectedPort, err := getAllowedIP(conf, domain, alpns)
 	if err != nil {
@@ -105,6 +106,9 @@ func (lc *ListenConfig) getOrCreateHostConfig(
 		if err != nil && err != errTryNext {
 			return "", nil, err
 		}
+	}
+	if ip != nil {
+		isSimpleDynamic = true
 	}
 
 	// Create backend configuration
@@ -139,6 +143,17 @@ func (lc *ListenConfig) getOrCreateHostConfig(
 		lc.slowConfigBySNIALPN[snialpn] = service
 		if terminate {
 			lc.slowCertmagicConfMap[domain] = struct{}{}
+		} else {
+			if isSimpleDynamic && backend.Port == 443 && slices.Contains(HTTPFamilyALPNs, alpns[0]) {
+				backendCopy := backend
+				lc.slowACMETLS1ByDomain[domain] = &backendCopy
+			}
+			// else {
+			// 	// TODO are there any conditions under which this would become ambiguous?
+			// 	// - 2+ protocols - we only handle this for http and ssh, so no worries there
+			// 	// - 2+ backends - such as multiple SRV records (not currently handled), no impact for CNAME
+			// 	// - advanced SRV - whatever handles 'posgresql' couldn't use ACMETLS currently
+			// }
 		}
 		lc.slowConfigMu.Unlock()
 		if terminate {

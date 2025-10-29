@@ -276,6 +276,7 @@ type ListenConfig struct {
 	adminServer           *http.Server
 	netLn                 net.Listener
 	slowCertmagicConfMap  map[string]struct{}
+	slowACMETLS1ByDomain  map[string]*Backend
 	slowConfigBySNIALPN   map[SNIALPN]*ConfigService
 	slowConfigMu          sync.RWMutex
 }
@@ -331,6 +332,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		alpnsByDomain:         domainMatchers,
 		configBySNIALPN:       snialpnMatchers,
 		slowConfigBySNIALPN:   make(map[SNIALPN]*ConfigService),
+		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
 		ACMEDirectoryEndpoint: directoryEndpoint,
@@ -849,9 +851,18 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				if magic == nil {
 					lc.slowConfigMu.RLock()
 					_, ok := lc.slowCertmagicConfMap[domain]
-					lc.slowConfigMu.RUnlock()
 					if ok {
 						magic = lc.certmagicTLSALPNOnly
+					} else {
+						backend = lc.slowACMETLS1ByDomain[domain]
+					}
+					lc.slowConfigMu.RUnlock()
+					if backend != nil {
+						var err error
+						if beConn, err = getBackendConn(lc.Context, backend.Host); err != nil {
+							return nil, err
+						}
+						return nil, ErrDoNotTerminate
 					}
 				}
 				if magic == lc.certmagicTLSALPNOnly {
