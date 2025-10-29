@@ -71,7 +71,7 @@ type Config struct {
 	Apps                  []ConfigApp        `json:"apps"`
 	certmagicStorage      certmagic.Storage  `json:"-"`
 	Networks              []net.IPNet        `json:"dynamic_host_networks"`
-	IPDomain              string             `json:"dynamic_ip_domain"`
+	IPDomains             []string           `json:"dynamic_ip_domains"`
 	IPs                   []net.IP           `json:"-"`
 }
 

@@ -195,7 +195,7 @@ func getAllowedIP(
 			return nil, false, "", 0, errTryNext
 		}
 
-		if conf.IPDomain != sld {
+		if !slices.Contains(conf.IPDomains, sld) {
 			return nil, false, "", 0, errTryNext
 		}
 	}
@@ -278,8 +278,15 @@ func getAllowedSrv(
 		dbg("DEBUG: %s: CNAME answer %q", domain, cname)
 		cname = strings.TrimSuffix(cname, ".")
 		dbg("DEBUG: %s: CNAME trim %q", domain, cname)
-		ipLabel, ok := strings.CutSuffix(cname, "."+conf.IPDomain)
-		dbg("DEBUG: %s: CNAME ip label %q", domain, ipLabel)
+		var ok bool
+		var ipLabel string
+		for _, domain := range conf.IPDomains {
+			ipLabel, ok = strings.CutSuffix(cname, "."+domain)
+			dbg("DEBUG: %s: CNAME ip label %q", domain, ipLabel)
+			if ok {
+				break
+			}
+		}
 		if !ok {
 			return
 		}
@@ -359,7 +366,7 @@ func getAllowedSrv(
 		for _, ip := range conf.IPs {
 			ipAddrs = append(ipAddrs, ip.String())
 		}
-		return nil, false, "", 0, fmt.Errorf("%q has no CNAME matching %q, nor A record matching any of %v", domain, conf.IPDomain, strings.Join(ipAddrs, ", "))
+		return nil, false, "", 0, fmt.Errorf("%q has no CNAME matching %q, nor A record matching any of %v", domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
 	}
 
 	for _, best := range options {
@@ -384,7 +391,7 @@ func findSrvForALPN(
 	// Start with the first SRV (sorted by priority/weight)
 	for _, srv := range srvAddrs {
 		dbg("DEBUG: %s: %s %s: SRV record %#v", domain, service, proto, srv)
-		ip, terminate, port, err := checkSrv(conf.IPDomain, conf.Networks, srv, domain, alpn)
+		ip, terminate, port, err := checkSRV(conf.IPDomains, conf.Networks, srv, domain, alpn)
 		dbg("DEBUG: %s: %s %s: SRV check %s, %t, %d, %v", domain, service, proto, ip, terminate, port, err)
 		if err != nil {
 			// TODO check... but there's nothing we could do
@@ -410,8 +417,8 @@ func findSrvForALPN(
 	return nil, false, 0, errTryNext
 }
 
-func checkSrv(
-	ipDomain string,
+func checkSRV(
+	ipDomains []string,
 	networks []net.IPNet,
 	srv *net.SRV, domain,
 	alpn string,
@@ -440,7 +447,14 @@ func checkSrv(
 	//   target = "tls-1-2-3-4.a.bnna.net.foo.com"
 	//   suffix = ".foo.com"
 	//   label = "net."
-	suffix, ok := strings.CutPrefix(targetParts[1], ipDomain)
+	var suffix string
+	var ok bool
+	for _, ipDomain := range ipDomains {
+		suffix, ok = strings.CutPrefix(targetParts[1], ipDomain)
+		if ok {
+			break
+		}
+	}
 	if !ok {
 		return nil, false, 0, errors.New("invalid SRV target suffix")
 	}

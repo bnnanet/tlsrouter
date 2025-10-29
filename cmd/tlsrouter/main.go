@@ -76,12 +76,12 @@ func main() {
 	mainFlags.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Check DYNAMIC_IP_BASE_URL environment variable, override default if set
-	var ipDomain string
+	var ipDomainList string
 	defaultIPBaseURL := "example.localdomain"
 	if envNetworks := os.Getenv("DYNAMIC_IP_DOMAIN"); envNetworks != "" {
 		defaultIPBaseURL = envNetworks
 	}
-	mainFlags.StringVar(&ipDomain, "ip-domain", defaultIPBaseURL, "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with this base")
+	mainFlags.StringVar(&ipDomainList, "ip-domains", defaultIPBaseURL, "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with these comma-separated base URLs")
 
 	// Check DYNAMIC_HOST_NETWORKS environment variable, override default if set
 	var networkList string
@@ -203,13 +203,10 @@ func main() {
 	}
 
 	// enabled dynamic ip networks
+	ipDomains := splitList(ipDomainList)
+
 	var networks []net.IPNet
-	var cidrs []string
-	if len(networkList) > 0 {
-		networkList = strings.ReplaceAll(strings.ReplaceAll(networkList, " ", ","), ",,", ",")
-		cidrs = strings.Split(networkList, ",")
-	}
-	for _, cidr := range cidrs {
+	for _, cidr := range splitList(networkList) {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invalid network %q: %v\n", cidr, err)
@@ -226,7 +223,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
 	}
-	conf, err := ReadConfig(confPath, tabVault, ipDomain, networks)
+	conf, err := ReadConfig(confPath, tabVault, ipDomains, networks)
 	if err != nil {
 		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 	}
@@ -253,7 +250,7 @@ func main() {
 				if err != nil {
 					log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
 				}
-				conf, err := ReadConfig(confPath, tabVault, ipDomain, networks)
+				conf, err := ReadConfig(confPath, tabVault, ipDomains, networks)
 				if err != nil {
 					log.Fatalf("Config Error: %q\n%s\n", confPath, err)
 				}
@@ -287,6 +284,16 @@ func main() {
 	wg.Wait()
 }
 
+func splitList(s string) []string {
+	s = strings.ReplaceAll(s, " ", ",")
+	s = strings.ReplaceAll(s, ",,", ",")
+	s = strings.TrimRight(s, ",")
+	if len(s) == 0 {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
 func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *http.ServeMux) error {
 	wg.Add(1)
 	go func() {
@@ -302,7 +309,7 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *htt
 }
 
 // ReadConfig reads and parses a JSON config file into a Config.
-func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomain string, networks []net.IPNet) (tlsrouter.Config, error) {
+func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string, networks []net.IPNet) (tlsrouter.Config, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return tlsrouter.Config{}, err
@@ -319,14 +326,31 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomain string, n
 	conf.FilePath = filePath
 	conf.TabVault = tabVault
 	conf.Networks = networks
-	conf.IPDomain = ipDomain
-	if len(conf.IPDomain) > 0 && !strings.HasSuffix(conf.IPDomain, ".local") {
-		conf.IPs, err = net.LookupIP(conf.IPDomain)
+	conf.IPDomains = ipDomains
+	for _, domain := range conf.IPDomains {
+		if strings.HasSuffix(domain, ".local") {
+			continue
+		}
+
+		ips, err := net.LookupIP(domain)
 		if err != nil {
 			return tlsrouter.Config{}, err
 		}
+		for _, ip := range ips {
+			var found bool
+			for _, existingIP := range conf.IPs {
+				if existingIP.String() == ip.String() {
+					found = true
+					break
+				}
+			}
+			if !found {
+				conf.IPs = append(conf.IPs, ip)
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "INFO resolved ip domain IPs: %#v\n", conf.IPs)
 	}
-	fmt.Fprintf(os.Stderr, "INFO resolved ip domain IPs: %#v\n", conf.IPs)
 
 	customAlpns := []string{"ssh"}
 	knownAlpns := ianaalpn.Names
