@@ -8,7 +8,7 @@ Supports both static and dynamic TLS routing.
 go run ./cmd/tlsrouter/ \
    --config ~/.config/tlsrouter/backends.csv \
    --vault ~/.config/tlsrouter/secrets.tsv \
-   --ip-domain vm.example.com \
+   --ip-domains vm.example.com \
    --networks 192.168.1.0/24 \
    --bind 0.0.0.0 \
    --port 443
