@@ -8,11 +8,11 @@ import (
 )
 
 type Backend struct {
-	Slug            string `json:"slug"`
-	Address         string `json:"address"`
-	Port            int    `json:"port"`
-	TerminateTLS    bool   `json:"terminate_tls"`
-	ConnectTLS      bool   `json:"connect_tls"`
+	Slug          string `json:"slug"`
+	Address       string `json:"address"`
+	Port          int    `json:"port"`
+	TerminateTLS  bool   `json:"terminate_tls"`
+	ConnectTLS    bool   `json:"connect_tls"`
 	SkipTLSVerify bool   `json:"connect_insecure"`
 }
 
