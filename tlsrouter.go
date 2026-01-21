@@ -563,7 +563,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 						r.SetURL(target)
 						r.Out.Host = r.In.Host // preserve Host header
 						r.SetXForwarded()
-						r.Out.Header["X-Forwarded-For"] = []string{"https"} // preserve https
+						r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // preserve https
 					},
 				}
 
