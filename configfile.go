@@ -257,15 +257,15 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 			backendPortStr = record[i]
 		}
 		terminateTLS := false
-		if i, ok := headerIndices["terminate_tls"]; ok && i < len(record) && record[i] == "true" {
+		if i, ok := headerIndices["terminate_tls"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
 			terminateTLS = true
 		}
 		connectTLS := false
-		if i, ok := headerIndices["connect_tls"]; ok && i < len(record) && record[i] == "true" {
+		if i, ok := headerIndices["connect_tls"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
 			connectTLS = true
 		}
 		connectInsecure := false
-		if i, ok := headerIndices["connect_insecure"]; ok && i < len(record) && record[i] == "true" {
+		if i, ok := headerIndices["connect_insecure"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
 			connectInsecure = true
 		}
 		allowedClientHostnames := []string{}
