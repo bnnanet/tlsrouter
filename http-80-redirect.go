@@ -17,7 +17,7 @@ func ListenAndRedirectPlainHTTP(addr string) error {
 	mux.HandleFunc("/", HandleHTTPSRedirect)
 
 	srv := &http.Server{
-		Addr:         ":80",
+		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
