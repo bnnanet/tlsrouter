@@ -31,6 +31,7 @@ var rawPortMap = map[string]uint16{
 	"irc":         6697,
 	"managesieve": 4190,
 	"mqtt":        8883,
+	"mysql":       3306,
 	"nntp":        563,
 	"ntske/1":     4460,
 	"ntske":       4460, // SRV shorthand
@@ -63,6 +64,7 @@ var terminatedPortMap = map[string]uint16{
 	"irc":         16667,
 	"managesieve": 14190,
 	"mqtt":        11883,
+	"mysql":       13306,
 	"nntp":        10119,
 	"ntske/1":     10123,
 	"ntske":       10123, // SRV shorthand
