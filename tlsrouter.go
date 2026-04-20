@@ -548,71 +548,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			alpn := snialpn.ALPN()
 			fmt.Fprintf(os.Stderr, "DEBUG: %s: incoming snialpn %s\n", domain, alpn)
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
-				backend.HTTPTunnel = tun.NewListener(lc.Context)
-
-				target := &url.URL{
-					Scheme: "http",
-					Host:   backend.Host,
-				}
-				if backend.ConnectTLS {
-					target.Scheme = "https"
-				}
-
-				proxy := &httputil.ReverseProxy{
-					Rewrite: func(r *httputil.ProxyRequest) {
-						r.SetURL(target)
-						r.Out.Host = r.In.Host        // preserve Host header
-						r.Out.Header.Del("X-Real-IP") // not auto-stripped
-						r.SetXForwarded()
-						r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // preserve https
-					},
-				}
-
-				// default transport https://pkg.go.dev/net/http#DefaultTransport
-				dialer := &net.Dialer{
-					// Timeout:       30 * time.Second,
-					Timeout:       400 * time.Millisecond, // TODO check internal/external, make user-configurable
-					FallbackDelay: 300 * time.Millisecond,
-					KeepAlive:     30 * time.Second,
-				}
-				transport := &http.Transport{
-					Proxy:                 http.ProxyFromEnvironment,
-					DialContext:           dialer.DialContext,
-					ForceAttemptHTTP2:     true,
-					MaxIdleConns:          100,
-					IdleConnTimeout:       90 * time.Second,
-					TLSHandshakeTimeout:   10 * time.Second,
-					ExpectContinueTimeout: 1 * time.Second,
-				}
-
-				// custom
-				protocols := &http.Protocols{}
-				protocols.SetHTTP1(true)
-				protocols.SetHTTP2(true)
-				protocols.SetUnencryptedHTTP2(true)
-				transport.Protocols = protocols
-
-				// I'll trust the Go authors' choice of ciphers:
-				// https://cs.opensource.google/go/go/+/refs/tags/go1.24.3:src/crypto/tls/cipher_suites.go;l=56
-				// hasAES := cpu.X86.HasAES || cpu.ARM64.HasAES || cpu.ARM.HasAES || cpu.S390X.HasAES || cpu.RISCV64.HasZvkn
-				transport.TLSClientConfig = &tls.Config{}
-				if backend.SkipTLSVerify {
-					transport.TLSClientConfig.InsecureSkipVerify = true
-				}
-				proxy.Transport = transport
-
-				// TODO track these for shutdown (to call Shutdown() and Close() on each)
-				proxyServer := &http.Server{
-					Handler: proxy,
-					BaseContext: func(_ net.Listener) context.Context {
-						return lc.Context
-					},
-					ConnContext: nil,
-					Protocols:   protocols,
-				}
-				go func() {
-					_ = proxyServer.Serve(backend.HTTPTunnel)
-				}()
+				lc.setupHTTPReverseProxy(&backend)
 				m.Backends[beIndex] = backend
 			}
 		}
@@ -621,6 +557,72 @@ func NewListenConfig(conf Config) *ListenConfig {
 	// Now we must never modify conf again!!
 	lc.StoreConfig(conf)
 	return lc
+}
+
+// setupHTTPReverseProxy installs an httputil.ReverseProxy + http.Server on
+// backend.HTTPTunnel so HTTP-family traffic has X-Forwarded-* re-set from the
+// trusted inbound request (http.ReverseProxy.Rewrite strips them by design).
+// Callers must have already chosen an HTTP-family ALPN for the backend.
+func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
+	backend.HTTPTunnel = tun.NewListener(lc.Context)
+
+	target := &url.URL{
+		Scheme: "http",
+		Host:   backend.Host,
+	}
+	if backend.ConnectTLS {
+		target.Scheme = "https"
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(target)
+			r.Out.Host = r.In.Host        // preserve Host header
+			r.Out.Header.Del("X-Real-IP") // not auto-stripped
+			r.SetXForwarded()
+			r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // preserve https
+		},
+	}
+
+	// default transport https://pkg.go.dev/net/http#DefaultTransport
+	dialer := &net.Dialer{
+		Timeout:       400 * time.Millisecond, // TODO check internal/external, make user-configurable
+		FallbackDelay: 300 * time.Millisecond,
+		KeepAlive:     30 * time.Second,
+	}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	protocols := &http.Protocols{}
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
+	transport.Protocols = protocols
+
+	transport.TLSClientConfig = &tls.Config{}
+	if backend.SkipTLSVerify {
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+	proxy.Transport = transport
+
+	// TODO track these for shutdown (to call Shutdown() and Close() on each)
+	proxyServer := &http.Server{
+		Handler: proxy,
+		BaseContext: func(_ net.Listener) context.Context {
+			return lc.Context
+		},
+		Protocols: protocols,
+	}
+	go func() {
+		_ = proxyServer.Serve(backend.HTTPTunnel)
+	}()
 }
 
 func (lc *ListenConfig) StoreConfig(conf Config) {
