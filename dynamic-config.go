@@ -128,6 +128,13 @@ func (lc *ListenConfig) getOrCreateHostConfig(
 	// TODO check that a backend exists here
 	// (any cached slowMatchConfig should do since what triggers that triggers this)
 
+	// Match the static-config init path: HTTP-family terminated services get
+	// a ReverseProxy so X-Forwarded-* are re-set from the trusted inbound conn
+	// instead of passed through from the untrusted client.
+	if terminate && slices.Contains(HTTPFamilyALPNs, selectedALPN) {
+		lc.setupHTTPReverseProxy(&backend)
+	}
+
 	// Create service configuration
 	service := &ConfigService{
 		Slug:                   serviceSlug,
