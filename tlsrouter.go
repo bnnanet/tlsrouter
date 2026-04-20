@@ -561,7 +561,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 				proxy := &httputil.ReverseProxy{
 					Rewrite: func(r *httputil.ProxyRequest) {
 						r.SetURL(target)
-						r.Out.Host = r.In.Host // preserve Host header
+						r.Out.Host = r.In.Host        // preserve Host header
+						r.Out.Header.Del("X-Real-IP") // not auto-stripped
 						r.SetXForwarded()
 						r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // preserve https
 					},
