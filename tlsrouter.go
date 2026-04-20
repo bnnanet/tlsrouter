@@ -600,12 +600,17 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	// Support h1, TLS-terminated h2 (ALPN), and h2c (preface-detected over
+	// plaintext) so terminated h2 traffic reaches the backend intact.
 	protocols := &http.Protocols{}
 	protocols.SetHTTP1(true)
 	protocols.SetHTTP2(true)
 	protocols.SetUnencryptedHTTP2(true)
 	transport.Protocols = protocols
 
+	// I'll trust the Go authors' choice of ciphers:
+	// https://cs.opensource.google/go/go/+/refs/tags/go1.24.3:src/crypto/tls/cipher_suites.go;l=56
+	// hasAES := cpu.X86.HasAES || cpu.ARM64.HasAES || cpu.ARM.HasAES || cpu.S390X.HasAES || cpu.RISCV64.HasZvkn
 	transport.TLSClientConfig = &tls.Config{}
 	if backend.SkipTLSVerify {
 		transport.TLSClientConfig.InsecureSkipVerify = true
