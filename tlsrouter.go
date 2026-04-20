@@ -1079,7 +1079,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	if backend.HTTPTunnel != nil {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLING > backend.HTTPTunnel.Inject\n", snialpn)
 		// doesn't block
-		retErr = backend.HTTPTunnel.Inject(wconn.PlainConn)
+		// Inject *tls.Conn (not PlainConn wrapper) so http.Server's
+		// rwc.(*tls.Conn) assertion sees TLS and uses ALPN to pick h2 vs h1.
+		retErr = backend.HTTPTunnel.Inject(tlsConn)
 		wconn.wg.Wait()
 	} else if beConn != nil {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLING > TunnelTCPConn(cConn, beConn)\n", snialpn)
