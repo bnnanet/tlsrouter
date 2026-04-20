@@ -579,8 +579,14 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 			r.SetURL(target)
 			r.Out.Host = r.In.Host        // preserve Host header
 			r.Out.Header.Del("X-Real-IP") // not auto-stripped
+			// We are the trust boundary: r.In.RemoteAddr is the real
+			// client, so SetXForwarded produces the authoritative
+			// X-Forwarded-For / Host / Proto. Downstream proxies
+			// must pass these through verbatim rather than calling
+			// SetXForwarded themselves — their view of RemoteAddr is
+			// this loopback hop, which would clobber the real client IP.
 			r.SetXForwarded()
-			r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // preserve https
+			r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // TLS terminated here
 		},
 	}
 
