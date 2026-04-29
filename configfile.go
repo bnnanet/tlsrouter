@@ -265,7 +265,7 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 			connectTLS = true
 		}
 		connectInsecure := false
-		if i, ok := headerIndices["connect_insecure"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
+		if i, ok := headerIndices["skip_tls_verify"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
 			connectInsecure = true
 		}
 		allowedClientHostnames := []string{}

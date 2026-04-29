@@ -588,6 +588,10 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 			r.SetXForwarded()
 			r.Out.Header["X-Forwarded-Proto"] = []string{"https"} // TLS terminated here
 		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("reverse proxy error for %s: %v", r.Host, err)
+			w.WriteHeader(http.StatusBadGateway)
+		},
 	}
 
 	// default transport https://pkg.go.dev/net/http#DefaultTransport
