@@ -577,7 +577,13 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
-			r.Out.Host = r.In.Host        // preserve Host header
+			if backend.ConnectTLS {
+				inHost := r.In.Host
+				rewriteHeaderHost(r.Out.Header, "Referer", inHost, target.Host)
+				rewriteHeaderHost(r.Out.Header, "Origin", inHost, target.Host)
+			} else {
+				r.Out.Host = r.In.Host // preserve original Host for plaintext backends
+			}
 			r.Out.Header.Del("X-Real-IP") // not auto-stripped
 			// We are the trust boundary: r.In.RemoteAddr is the real
 			// client, so SetXForwarded produces the authoritative
@@ -638,6 +644,22 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 	go func() {
 		_ = proxyServer.Serve(backend.HTTPTunnel)
 	}()
+}
+
+func rewriteHeaderHost(h http.Header, key, oldHost, newHost string) {
+	val := h.Get(key)
+	if val == "" {
+		return
+	}
+	u, err := url.Parse(val)
+	if err != nil {
+		h.Del(key)
+		return
+	}
+	if u.Host == oldHost {
+		u.Host = newHost
+		h.Set(key, u.String())
+	}
 }
 
 func (lc *ListenConfig) StoreConfig(conf Config) {
