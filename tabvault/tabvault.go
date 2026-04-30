@@ -1,14 +1,21 @@
 package tabvault
 
 import (
+	"bytes"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 )
+
+const phcPrefix = "$pbkdf2-sha256$"
 
 type SecretID = string
 type SecretHash = [32]byte
@@ -134,4 +141,52 @@ func (v *TabVault) Get(id string) string {
 	defer v.mu.RUnlock()
 
 	return v.secrets[strings.TrimPrefix(id, "vault://")]
+}
+
+type BasicAuthPassword string
+
+func (p BasicAuthPassword) Verify(_, password string) bool {
+	known := sha256.Sum256([]byte(p))
+	digest := sha256.Sum256([]byte(password))
+	return bytes.Equal(known[:], digest[:])
+}
+
+func (v *TabVault) Verify(id string, password string) bool {
+	secret := v.Get(id)
+	if secret == "" {
+		return false
+	}
+
+	if !strings.HasPrefix(secret, phcPrefix) {
+		return BasicAuthPassword(secret).Verify("", password)
+	}
+
+	// $pbkdf2-sha256$iterations$salt_b64$hash_b64
+	inner := secret[1:]
+	parts := strings.SplitN(inner, "$", 4)
+	if len(parts) != 4 {
+		return false
+	}
+
+	iterations, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+
+	derived, err := base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return false
+	}
+
+	dk, err := pbkdf2.Key(sha256.New, password, salt, iterations, 32)
+	if err != nil {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare(dk, derived) == 1
 }

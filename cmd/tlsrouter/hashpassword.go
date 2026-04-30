@@ -16,11 +16,13 @@ func readPasswordPrompt(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
 	cmd := exec.Command("stty", "-echo")
 	cmd.Stdin = os.Stdin
-	_ = cmd.Run()
+	hidden := cmd.Run() == nil
 	defer func() {
-		cmd := exec.Command("stty", "echo")
-		cmd.Stdin = os.Stdin
-		_ = cmd.Run()
+		if hidden {
+			cmd := exec.Command("stty", "echo")
+			cmd.Stdin = os.Stdin
+			_ = cmd.Run()
+		}
 		fmt.Fprintln(os.Stderr)
 	}()
 

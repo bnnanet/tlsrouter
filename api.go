@@ -12,6 +12,28 @@ import (
 	"time"
 )
 
+type BasicAuthVerifier interface {
+	Verify(string, string) bool
+}
+
+// JSONError represents an API error response
+type JSONError struct {
+	Error  string `json:"error"`
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+func jsonError(w http.ResponseWriter, status int, code, errorMsg, detail string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(JSONError{
+		Error:  errorMsg,
+		Code:   code,
+		Detail: detail,
+	})
+}
+
 // Int52 is a newtype for int that marshals/unmarshals as int64 in JSON.
 type Int52 int64
 
@@ -113,11 +135,9 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 }
 
 func (c *Config) requireToken(w http.ResponseWriter, r *http.Request) bool {
-	username, password, ok := r.BasicAuth()
+	_, password, ok := r.BasicAuth()
 
-	adminToken := c.TabVault.Get(c.AdminDNS.AdminToken)
-	p := BasicAuthPassword(adminToken)
-	if !ok || !p.Verify(username, password) {
+	if !ok || !c.TabVault.Verify(c.AdminDNS.AdminToken, password) {
 		jsonError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Invalid credentials")
 		return false
 	}
