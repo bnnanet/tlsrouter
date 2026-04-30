@@ -9,7 +9,11 @@ g_out="${1:-./tlsrouter}"
 g_version="$(git describe --tags --always --dirty 2> /dev/null || echo 0.0.0-dev)"
 g_version="${g_version#v}"
 g_commit="$(git rev-parse HEAD 2> /dev/null || echo 0000000)"
-g_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if test -z "$(git status --porcelain)"; then
+	g_date="$(git log -1 --format=%cI)"
+else
+	g_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
 
 g_ldflags="-X main.version=${g_version}"
 g_ldflags="${g_ldflags} -X main.commit=${g_commit}"
