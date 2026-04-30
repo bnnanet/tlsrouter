@@ -125,7 +125,7 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 		Since:      JSONTime(wconn.Connected),
 	}
 	if wconn.PlainConn != nil {
-		tlsState := wconn.PlainConn.ConnectionState()
+		tlsState := wconn.PlainConn.TLSConnectionState()
 		pconn.ServerName = tlsState.ServerName
 		pconn.ALPN = tlsState.NegotiatedProtocol
 		pconn.PlainRead = Int52(wconn.PlainConn.BytesRead.Load())

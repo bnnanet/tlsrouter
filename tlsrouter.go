@@ -1221,9 +1221,11 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 	if backend.HTTPTunnel != nil {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLING > backend.HTTPTunnel.Inject\n", snialpn)
 		// doesn't block
-		// Inject *tls.Conn (not PlainConn wrapper) so http.Server's
-		// rwc.(*tls.Conn) assertion sees TLS and uses ALPN to pick h2 vs h1.
-		retErr = backend.HTTPTunnel.Inject(tlsConn)
+		// Inject the PlainConn wrapper (not *tls.Conn). It exposes only
+		// net.Conn so http.Server's rwc.(*tls.Conn) assertion fails and h2c
+		// preface detection runs over the decrypted stream — while keeping
+		// plaintext byte counters on the wrapper.
+		retErr = backend.HTTPTunnel.Inject(wconn.PlainConn)
 		wconn.wg.Wait()
 	} else if beConn != nil {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLING > TunnelTCPConn(cConn, beConn)\n", snialpn)
@@ -1544,30 +1546,43 @@ func (wconn *wrappedConn) Close() error {
 	panic(fmt.Errorf("sanity fail: wrappedConn does not support Close"))
 }
 
+// PlainConn wraps a *tls.Conn as a private field (not embedded) for two reasons:
+//  1. Byte counting — Read/Write intercept plaintext traffic so we can track
+//     bandwidth at both the TLS and TCP layers independently.
+//  2. h2 detection — exposing only net.Conn makes http.Server's rwc.(*tls.Conn)
+//     assertion fail, so h2c-preface detection runs on the decrypted stream.
+//
+// ConnectionState is still accessible via an explicit method for stats/reporting.
 type PlainConn struct {
-	*tls.Conn
+	c            *tls.Conn
 	BytesRead    atomic.Uint64
 	BytesWritten atomic.Uint64
 }
 
 func NewPlainConn(tc *tls.Conn) *PlainConn {
-	c := &PlainConn{
-		Conn:         tc,
-		BytesRead:    atomic.Uint64{},
-		BytesWritten: atomic.Uint64{},
-	}
-
-	return c
+	return &PlainConn{c: tc}
 }
 
-func (tc *PlainConn) Read(b []byte) (int, error) {
-	n, err := tc.Conn.Read(b)
-	tc.BytesRead.Add(uint64(n))
+func (p *PlainConn) Read(b []byte) (int, error) {
+	n, err := p.c.Read(b)
+	p.BytesRead.Add(uint64(n))
 	return n, err
 }
 
-func (tc *PlainConn) Write(b []byte) (int, error) {
-	n, err := tc.Conn.Write(b)
-	tc.BytesWritten.Add(uint64(n))
+func (p *PlainConn) Write(b []byte) (int, error) {
+	n, err := p.c.Write(b)
+	p.BytesWritten.Add(uint64(n))
 	return n, err
 }
+
+func (p *PlainConn) Close() error                       { return p.c.Close() }
+func (p *PlainConn) LocalAddr() net.Addr                { return p.c.LocalAddr() }
+func (p *PlainConn) RemoteAddr() net.Addr               { return p.c.RemoteAddr() }
+func (p *PlainConn) SetDeadline(t time.Time) error      { return p.c.SetDeadline(t) }
+func (p *PlainConn) SetReadDeadline(t time.Time) error  { return p.c.SetReadDeadline(t) }
+func (p *PlainConn) SetWriteDeadline(t time.Time) error { return p.c.SetWriteDeadline(t) }
+
+// TLSConnectionState exposes TLS state for reporting. Named to avoid matching
+// net/http's unexported connectionStater interface, which would set tlsState
+// and prevent h2c preface detection on the decrypted stream.
+func (p *PlainConn) TLSConnectionState() tls.ConnectionState { return p.c.ConnectionState() }
