@@ -132,7 +132,7 @@ func (lc *ListenConfig) getOrCreateHostConfig(
 	// a ReverseProxy so X-Forwarded-* are re-set from the trusted inbound conn
 	// instead of passed through from the untrusted client.
 	if terminate && slices.Contains(HTTPFamilyALPNs, selectedALPN) {
-		lc.setupHTTPReverseProxy(&backend)
+		lc.setupHTTPReverseProxy(domain, &backend, conf.TabVault)
 	}
 
 	// Create service configuration

@@ -3,7 +3,10 @@ package tlsrouter
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -222,6 +225,7 @@ type Backend struct {
 	ForceHTTP     bool               `json:"force_http,omitempty"`
 	ConnectTLS    bool               `json:"connect_tls"`
 	SkipTLSVerify bool               `json:"connect_insecure"`
+	AuthToken     string             `json:"auth_token,omitempty"`
 	// Healthy         *atomic.Bool       `json:"-"`
 	// ConnectSNI      string             `json:"connect_sni,omitempty"`
 	// ConnectALPNs    string             `json:"connect_alpn,omitempty"`
@@ -548,7 +552,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			alpn := snialpn.ALPN()
 			fmt.Fprintf(os.Stderr, "DEBUG: %s: incoming snialpn %s\n", domain, alpn)
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
-				lc.setupHTTPReverseProxy(&backend)
+				lc.setupHTTPReverseProxy(domain, &backend, conf.TabVault)
 				m.Backends[beIndex] = backend
 			}
 		}
@@ -563,8 +567,15 @@ func NewListenConfig(conf Config) *ListenConfig {
 // backend.HTTPTunnel so HTTP-family traffic has X-Forwarded-* re-set from the
 // trusted inbound request (http.ReverseProxy.Rewrite strips them by design).
 // Callers must have already chosen an HTTP-family ALPN for the backend.
-func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
+func (lc *ListenConfig) setupHTTPReverseProxy(domain string, backend *Backend, vault *tabvault.TabVault) {
 	backend.HTTPTunnel = tun.NewListener(lc.Context)
+	var authMissing bool
+	if backend.AuthToken != "" {
+		if vault == nil || vault.Get(backend.AuthToken) == "" {
+			authMissing = true
+			log.Printf("FATAL: auth token %q not found in vault for %s — blocking all traffic", backend.AuthToken, backend.Host)
+		}
+	}
 
 	target := &url.URL{
 		Scheme: "http",
@@ -633,9 +644,18 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 	}
 	proxy.Transport = transport
 
+	var handler http.Handler = proxy
+	if authMissing {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "503 Service Unavailable\n", http.StatusServiceUnavailable)
+		})
+	} else if backend.AuthToken != "" {
+		handler = newAuthGate(domain, vault, backend.AuthToken, proxy)
+	}
+
 	// TODO track these for shutdown (to call Shutdown() and Close() on each)
 	proxyServer := &http.Server{
-		Handler: proxy,
+		Handler: handler,
 		BaseContext: func(_ net.Listener) context.Context {
 			return lc.Context
 		},
@@ -644,6 +664,89 @@ func (lc *ListenConfig) setupHTTPReverseProxy(backend *Backend) {
 	go func() {
 		_ = proxyServer.Serve(backend.HTTPTunnel)
 	}()
+}
+
+const (
+	authHeaderName = "X-TLS-Router-Auth"
+	authCookieName = "tlsrouter_session"
+)
+
+var authHMACKey []byte
+
+func init() {
+	authHMACKey = make([]byte, 32)
+	if _, err := rand.Read(authHMACKey); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
+}
+
+func sessionMAC(domain string) string {
+	mac := hmac.New(sha256.New, authHMACKey)
+	mac.Write([]byte(domain))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func newAuthGate(domain string, verifier BasicVerifier, tokenID string, next http.Handler) http.Handler {
+	expectedMAC := sessionMAC(domain)
+	authPrompt := fmt.Sprintf("Access to %s requires authentication.\n\n"+
+		"Enter %q as the username and your access token as the password.\n"+
+		"For automated access (no cookies), set the %s header.\n", domain, domain, authHeaderName)
+	wwwAuth := fmt.Sprintf(`Basic realm=%q`, domain)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		if headerVal := r.Header.Get(authHeaderName); headerVal != "" {
+			if verifier.Verify(tokenID, headerVal) == nil {
+				r.Header.Del(authHeaderName)
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", wwwAuth)
+			http.Error(w, "401 Unauthorized\n", http.StatusUnauthorized)
+			return
+		}
+
+		if cookie, err := r.Cookie(authCookieName); err == nil {
+			if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expectedMAC)) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{
+				Name:     authCookieName,
+				Value:    "",
+				Path:     "/",
+				MaxAge:   -1,
+				HttpOnly: true,
+				Secure:   true,
+			})
+			w.Header().Set("WWW-Authenticate", wwwAuth)
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprintf(w, "Session expired. %s", authPrompt)
+			return
+		}
+
+		if _, password, ok := r.BasicAuth(); ok {
+			if verifier.Verify(tokenID, password) == nil {
+				http.SetCookie(w, &http.Cookie{
+					Name:     authCookieName,
+					Value:    expectedMAC,
+					Path:     "/",
+					HttpOnly: true,
+					Secure:   true,
+					SameSite: http.SameSiteLaxMode,
+				})
+				http.Redirect(w, r, r.URL.RequestURI(), http.StatusFound)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", wwwAuth)
+			http.Error(w, "401 Unauthorized\n", http.StatusUnauthorized)
+			return
+		}
+
+		w.Header().Set("WWW-Authenticate", wwwAuth)
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, authPrompt)
+	})
 }
 
 func rewriteHeaderHost(h http.Header, key, oldHost, newHost string) {

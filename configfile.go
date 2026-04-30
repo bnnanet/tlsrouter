@@ -196,10 +196,13 @@ var expectedHeaders = []string{
 	"terminate_tls",
 	"connect_tls",
 	"skip_tls_verify",
+	"auth",
 	"allowed_client_hostnames",
 }
 
 func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
+	r.FieldsPerRecord = -1
+
 	config := &Config{
 		AdminDNS: ConfigAdmin{},
 		Apps:     []ConfigApp{},
@@ -267,6 +270,10 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 		connectInsecure := false
 		if i, ok := headerIndices["skip_tls_verify"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
 			connectInsecure = true
+		}
+		authToken := ""
+		if i, ok := headerIndices["auth"]; ok && i < len(record) && record[i] != "" {
+			authToken = record[i]
 		}
 		allowedClientHostnames := []string{}
 		if i, ok := headerIndices["allowed_client_hostnames"]; ok && i < len(record) && record[i] != "" {
@@ -385,6 +392,7 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 				TerminateTLS:  terminateTLS,
 				ConnectTLS:    connectTLS,
 				SkipTLSVerify: connectInsecure,
+				AuthToken:     authToken,
 			}
 			service.Backends = append(service.Backends, backend)
 		}
@@ -424,6 +432,7 @@ type CSVRecord struct {
 	TerminateTLS           bool
 	ConnectTLS             bool
 	SkipTLSVerify          bool
+	Auth                   string
 	AllowedClientHostnames string
 }
 
@@ -455,6 +464,7 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 							TerminateTLS:           backend.TerminateTLS,
 							ConnectTLS:             backend.ConnectTLS,
 							SkipTLSVerify:          backend.SkipTLSVerify,
+							Auth:                   backend.AuthToken,
 							AllowedClientHostnames: strings.Join(service.AllowedClientHostnames, ";"),
 						})
 					}
@@ -495,6 +505,9 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 		if a.SkipTLSVerify != b.SkipTLSVerify {
 			return strings.Compare(fmt.Sprintf("%t", a.SkipTLSVerify), fmt.Sprintf("%t", b.SkipTLSVerify))
 		}
+		if a.Auth != b.Auth {
+			return strings.Compare(a.Auth, b.Auth)
+		}
 		return strings.Compare(a.AllowedClientHostnames, b.AllowedClientHostnames)
 	})
 
@@ -519,6 +532,7 @@ func RecordsToCSV(csvw *csv.Writer, records []CSVRecord) error {
 			fmt.Sprintf("%t", record.TerminateTLS),
 			fmt.Sprintf("%t", record.ConnectTLS),
 			fmt.Sprintf("%t", record.SkipTLSVerify),
+			record.Auth,
 			record.AllowedClientHostnames,
 		}
 		if err := csvw.Write(csvRow); err != nil {
