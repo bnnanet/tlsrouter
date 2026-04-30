@@ -63,6 +63,11 @@ func printVersion() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
+		os.Exit(runHashPassword())
+		return
+	}
+
 	if err := godotenv.Load(".env"); err != nil {
 		if err != os.ErrNotExist {
 			log.Printf("could not read .env: %s", err)
