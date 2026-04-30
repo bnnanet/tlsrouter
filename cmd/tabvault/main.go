@@ -54,12 +54,12 @@ func main() {
 			os.Exit(1)
 		}
 		password := readSecret()
-		if tabVault.Verify(args[2], password) {
-			fmt.Fprintln(os.Stderr, "OK")
-			os.Exit(0)
+		if tabVault.Verify(args[2], password) != nil {
+			fmt.Fprintln(os.Stderr, "FAIL")
+			os.Exit(1)
 		}
-		fmt.Fprintln(os.Stderr, "FAIL")
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "OK")
+		os.Exit(0)
 	default:
 		mainFlags.Usage()
 		os.Exit(1)

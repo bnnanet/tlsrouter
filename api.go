@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-type BasicAuthVerifier interface {
-	Verify(string, string) bool
+type BasicVerifier interface {
+	Verify(string, string) error
 }
 
 // JSONError represents an API error response
@@ -136,8 +136,12 @@ func WConnToPConn(wconn *wrappedConn) PConn {
 
 func (c *Config) requireToken(w http.ResponseWriter, r *http.Request) bool {
 	_, password, ok := r.BasicAuth()
+	if !ok {
+		jsonError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Invalid credentials")
+		return false
+	}
 
-	if !ok || !c.TabVault.Verify(c.AdminDNS.AdminToken, password) {
+	if err := c.TabVault.Verify(c.AdminDNS.AdminToken, password); err != nil {
 		jsonError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Invalid credentials")
 		return false
 	}

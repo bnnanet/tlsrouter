@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -143,18 +144,23 @@ func (v *TabVault) Get(id string) string {
 	return v.secrets[strings.TrimPrefix(id, "vault://")]
 }
 
+var ErrInvalidCredentials = errors.New("invalid credentials")
+
 type BasicAuthPassword string
 
-func (p BasicAuthPassword) Verify(_, password string) bool {
+func (p BasicAuthPassword) Verify(_, password string) error {
 	known := sha256.Sum256([]byte(p))
 	digest := sha256.Sum256([]byte(password))
-	return bytes.Equal(known[:], digest[:])
+	if !bytes.Equal(known[:], digest[:]) {
+		return ErrInvalidCredentials
+	}
+	return nil
 }
 
-func (v *TabVault) Verify(id string, password string) bool {
+func (v *TabVault) Verify(id string, password string) error {
 	secret := v.Get(id)
 	if secret == "" {
-		return false
+		return ErrInvalidCredentials
 	}
 
 	if !strings.HasPrefix(secret, phcPrefix) {
@@ -165,28 +171,31 @@ func (v *TabVault) Verify(id string, password string) bool {
 	inner := secret[1:]
 	parts := strings.SplitN(inner, "$", 4)
 	if len(parts) != 4 {
-		return false
+		return ErrInvalidCredentials
 	}
 
 	iterations, err := strconv.Atoi(parts[1])
 	if err != nil {
-		return false
+		return ErrInvalidCredentials
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
 	if err != nil {
-		return false
+		return ErrInvalidCredentials
 	}
 
 	derived, err := base64.RawStdEncoding.DecodeString(parts[3])
 	if err != nil {
-		return false
+		return ErrInvalidCredentials
 	}
 
 	dk, err := pbkdf2.Key(sha256.New, password, salt, iterations, 32)
 	if err != nil {
-		return false
+		return ErrInvalidCredentials
 	}
 
-	return subtle.ConstantTimeCompare(dk, derived) == 1
+	if subtle.ConstantTimeCompare(dk, derived) != 1 {
+		return ErrInvalidCredentials
+	}
+	return nil
 }
