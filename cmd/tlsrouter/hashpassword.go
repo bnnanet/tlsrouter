@@ -74,7 +74,7 @@ func runHashPassword() int {
 	salt := make([]byte, 16)
 	_, _ = rand.Read(salt)
 
-	iterations := 600000
+	iterations := 10000
 	dk, err := pbkdf2.Key(sha256.New, password, salt, iterations, 32)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
