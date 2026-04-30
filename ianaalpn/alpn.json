@@ -185,7 +185,7 @@
     "protocol": "CoAP (over DTLS)",
     "name": "co",
     "bytes": "636f",
-    "reference": "[draft-lenders-core-coap-dtls-svcb-00]"
+    "reference": "[RFC7252][RFC9952]"
   },
   {
     "protocol": "XMPP jabber:client namespace",
@@ -300,5 +300,35 @@
     "name": "radius/1.1",
     "bytes": "7261646975732f312e31",
     "reference": "[RFC9765]"
+  },
+  {
+    "protocol": "NetPerfMeter Protocol Control Channel (NPMP-CONTROL)",
+    "name": "netperfmeter/control",
+    "bytes": "6e6574706572666d657465722f636f6e74726f6c",
+    "reference": "[https://www.nntb.no/~dreibh/netperfmeter/]"
+  },
+  {
+    "protocol": "NetPerfMeter Protocol Data Channel (NPMP-DATA)",
+    "name": "netperfmeter/data",
+    "bytes": "6e6574706572666d657465722f64617461",
+    "reference": "[https://www.nntb.no/~dreibh/netperfmeter/]"
+  },
+  {
+    "protocol": "N-PAMP (Native Post-Quantum Agent Messaging Protocol), wire major version 2",
+    "name": "n-pamp/2",
+    "bytes": "6e2d70616d702f32",
+    "reference": "[draft-bubblefish-npamp-00]"
+  },
+  {
+    "protocol": "EoQ",
+    "name": "EoQ",
+    "bytes": "456f51",
+    "reference": "[RFC-ietf-regext-epp-quic-12]"
+  },
+  {
+    "protocol": "SNIF over QUIC",
+    "name": "snifq/1",
+    "bytes": "736e6966712f31",
+    "reference": "[draft-zubov-snif-05, Section 4.4]"
   }
 ]
