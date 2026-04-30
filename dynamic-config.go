@@ -273,8 +273,10 @@ func getAllowedSrv(
 	}
 
 	alpnsLen := len(alpns)
-	cnameOptions := 2
-	options := make([]*srvOption, alpnsLen+cnameOptions)
+	// options layout: [CNAME results | SRV results], same ALPN order in each half
+	cnameOffset := 0
+	srvOffset := alpnsLen
+	options := make([]*srvOption, alpnsLen+alpnsLen)
 
 	var wg sync.WaitGroup
 	ipQueries := 2
@@ -332,14 +334,15 @@ func getAllowedSrv(
 			portMap = rawPortMap
 		}
 
-		c := len(options)
-		if slices.Contains(alpns, "ssh") {
-			options[c-2] = &srvOption{alpn: "ssh", ip: ip, terminate: terminate, port: terminatedPortMap["ssh"]}
+		for i, alpn := range alpns {
+			port, ok := portMap[alpn]
+			if !ok {
+				continue
+			}
+			cnameMatch = true
+			options[cnameOffset+i] = &srvOption{alpn: alpn, ip: ip, terminate: terminate, port: port}
 		}
-		if slices.Contains(alpns, "http/1.1") {
-			options[c-1] = &srvOption{alpn: "http/1.1", ip: ip, terminate: terminate, port: portMap["http/1.1"]}
-		}
-		dbg("DEBUG: %s: CNAME to ip: ssh,http (low-priority default), %s, terminate: %t", domain, ip.String(), terminate)
+		dbg("DEBUG: %s: CNAME to ip: %d ALPNs, %s, terminate: %t", domain, len(alpns), ip.String(), terminate)
 	}()
 	go func() {
 		defer wg.Done()
@@ -363,7 +366,7 @@ func getAllowedSrv(
 			defer wg.Done()
 
 			if ip, terminate, port, err := findSrvForALPN(conf, domain, alpn); err == nil {
-				options[index] = &srvOption{alpn: alpn, ip: ip, terminate: terminate, port: port}
+				options[srvOffset+index] = &srvOption{alpn: alpn, ip: ip, terminate: terminate, port: port}
 			}
 		}(alpn, idx)
 	}
