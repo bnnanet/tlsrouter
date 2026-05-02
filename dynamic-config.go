@@ -1,6 +1,7 @@
 package tlsrouter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/bnnanet/tlsrouter/dnsresolver"
 )
 
 var ErrUnknownNetwork = fmt.Errorf("the target ip is not part of a known network")
@@ -87,6 +91,7 @@ type dnsRoute struct {
 	IP        net.IP
 	ALPN      string
 	Port      uint16
+	TTL       uint32
 	Terminate bool
 }
 
@@ -96,13 +101,13 @@ func dbg(tmpl string, args ...any) {
 	debugMux.Unlock()
 }
 
-func (lc *ListenConfig) resolveRoute(conf *Config, domain string, alpns []string) (*dnsRoute, error) {
+func (lc *ListenConfig) resolveRoute(ctx context.Context, conf *Config, domain string, alpns []string) (*dnsRoute, error) {
 	route, err := getAllowedIP(conf, domain, alpns)
 	if err != nil {
 		if err != errTryNext {
 			return nil, err
 		}
-		route, err = getAllowedSrv(conf, domain, alpns)
+		route, err = getAllowedSrv(ctx, lc.dns, conf, domain, alpns)
 		if err != nil {
 			return nil, err
 		}
@@ -122,9 +127,6 @@ func (lc *ListenConfig) buildService(conf *Config, domain string, route *dnsRout
 		SkipTLSVerify: false,
 	}
 
-	// HTTP-family terminated services get a ReverseProxy so X-Forwarded-*
-	// headers are re-set from the trusted inbound conn instead of passed
-	// through from the untrusted client.
 	if route.Terminate && slices.Contains(HTTPFamilyALPNs, route.ALPN) {
 		lc.setupHTTPReverseProxy(domain, &backend, conf.TabVault)
 	}
@@ -142,8 +144,19 @@ func (lc *ListenConfig) buildService(conf *Config, domain string, route *dnsRout
 }
 
 func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *ConfigService, route *dnsRoute, alpns []string) error {
+	now := time.Now()
+	ttlDur := clampTTL(route.TTL)
+	if route.TTL == 0 {
+		ttlDur = defaultTTL
+	}
+	entry := &dnsCacheEntry{
+		service:   service,
+		staleAt:   now.Add(ttlDur),
+		expiredAt: now.Add(ttlDur + staleTTL),
+	}
+
 	lc.slowConfigMu.Lock()
-	lc.slowConfigBySNIALPN[snialpn] = service
+	lc.slowConfigBySNIALPN[snialpn] = entry
 	if route.Terminate {
 		lc.slowCertmagicConfMap[domain] = struct{}{}
 	} else {
@@ -240,13 +253,17 @@ func getAllowedIP(
 	}, nil
 }
 
+// getAllowedSrv returns a route via CNAME or SRV DNS lookup.
 func getAllowedSrv(
+	ctx context.Context,
+	dns *dnsresolver.Resolver,
 	conf *Config,
 	domain string,
 	alpns []string,
 ) (*dnsRoute, error) {
 	var cnameMatch bool
 	var ipMatch bool
+	var cnameTTL uint32
 
 	if len(alpns) > 3 {
 		alpns = alpns[:4]
@@ -259,14 +276,15 @@ func getAllowedSrv(
 	options := make([]*dnsRoute, alpnsLen+alpnsLen)
 
 	var wg sync.WaitGroup
-	ipQueries := 2
-	wg.Add(ipQueries + alpnsLen)
 
-	go func() {
-		defer wg.Done()
-
-		cname, _ := net.LookupCNAME(domain)
-		dbg("DEBUG: %s: CNAME answer %q", domain, cname)
+	wg.Go(func() {
+		cname, ttl, err := dns.LookupCNAME(ctx, domain)
+		if err != nil {
+			dbg("DEBUG: %s: CNAME lookup err: %v", domain, err)
+			return
+		}
+		cnameTTL = ttl
+		dbg("DEBUG: %s: CNAME answer %q (ttl=%d)", domain, cname, ttl)
 		cname = strings.TrimSuffix(cname, ".")
 		dbg("DEBUG: %s: CNAME trim %q", domain, cname)
 		var ok bool
@@ -324,15 +342,18 @@ func getAllowedSrv(
 				IP:        ip,
 				ALPN:      alpn,
 				Port:      port,
+				TTL:       ttl,
 				Terminate: terminate,
 			}
 		}
 		dbg("DEBUG: %s: CNAME to ip: %d ALPNs, %s, terminate: %t", domain, len(alpns), ip.String(), terminate)
-	}()
-	go func() {
-		defer wg.Done()
-
-		ips, _ := net.LookupIP(domain)
+	})
+	wg.Go(func() {
+		ips, _, err := dns.LookupIP(ctx, domain)
+		if err != nil {
+			dbg("DEBUG: %s: A lookup err: %v", domain, err)
+			return
+		}
 		dbg("DEBUG: %s: A records: %d", domain, len(ips))
 		for _, aIP := range ips {
 			dbg("DEBUG: %s: A %q", domain, aIP.String())
@@ -345,15 +366,13 @@ func getAllowedSrv(
 				break
 			}
 		}
-	}()
+	})
 	for idx, alpn := range alpns {
-		go func(alpn string, index int) {
-			defer wg.Done()
-
-			if route, err := findSrvForALPN(conf, domain, alpn); err == nil {
-				options[srvOffset+index] = route
+		wg.Go(func() {
+			if route, err := findSrvForALPN(ctx, dns, conf, domain, alpn); err == nil {
+				options[srvOffset+idx] = route
 			}
-		}(alpn, idx)
+		})
 	}
 
 	wg.Wait()
@@ -368,6 +387,9 @@ func getAllowedSrv(
 
 	for _, best := range options {
 		if best != nil {
+			if best.TTL == 0 {
+				best.TTL = cnameTTL
+			}
 			return best, nil
 		}
 	}
@@ -375,6 +397,8 @@ func getAllowedSrv(
 }
 
 func findSrvForALPN(
+	ctx context.Context,
+	dns *dnsresolver.Resolver,
 	conf *Config,
 	domain string,
 	alpn string,
@@ -382,24 +406,35 @@ func findSrvForALPN(
 	service := strings.ReplaceAll(strings.ReplaceAll(alpn, "/", "_"), ".", "-")
 
 	proto := "tcp"
-	_, srvAddrs, err := net.LookupSRV(service, proto, domain)
-	dbg("DEBUG: %s: %s %s: SRV len %d", domain, service, proto, len(srvAddrs))
+	srvRecs, srvTTL, err := dns.LookupSRV(ctx, service, proto, domain)
+	dbg("DEBUG: %s: %s %s: SRV len %d", domain, service, proto, len(srvRecs))
 
-	for _, srv := range srvAddrs {
-		dbg("DEBUG: %s: %s %s: SRV record %#v", domain, service, proto, srv)
-		route, checkErr := checkSRV(conf.IPDomains, conf.Networks, srv, domain, alpn)
+	for _, srv := range srvRecs {
+		srvCompat := &net.SRV{
+			Target:   srv.Target,
+			Port:     srv.Port,
+			Priority: srv.Priority,
+			Weight:   srv.Weight,
+		}
+		dbg("DEBUG: %s: %s %s: SRV record %#v", domain, service, proto, srvCompat)
+		route, checkErr := checkSRV(conf.IPDomains, conf.Networks, srvCompat, domain, alpn)
 		dbg("DEBUG: %s: %s %s: SRV check %v, %v", domain, service, proto, route, checkErr)
 		if checkErr != nil {
 			continue
 		}
+		route.TTL = srvTTL
 		return route, nil
 	}
 
 	if service != alpn {
-		// http/1.1 => http, tds/8.0 => tds, stun.turn => stun-turn
+		// http/1.1 => http
+		// tds/8.0 => tds
+		// stun.turn => stun-turn
 		service = strings.Split(alpn, "/")[0]
+		// no known ALPNs have both dots in the name and in versions,
+		// so this is just for future-proofing, ex: stun.turn/2.0
 		service = strings.ReplaceAll(service, ".", "-")
-		return findSrvForALPN(conf, domain, service)
+		return findSrvForALPN(ctx, dns, conf, domain, service)
 	}
 
 	if err != nil {

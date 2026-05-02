@@ -28,8 +28,10 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/sys/unix"
 
+	"github.com/bnnanet/tlsrouter/dnsresolver"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
@@ -279,10 +281,12 @@ type ListenConfig struct {
 	netConf               net.ListenConfig
 	adminServer           *http.Server
 	netLn                 net.Listener
+	dns                   *dnsresolver.Resolver
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
-	slowConfigBySNIALPN   map[SNIALPN]*ConfigService
+	slowConfigBySNIALPN   map[SNIALPN]*dnsCacheEntry
 	slowConfigMu          sync.RWMutex
+	resolveGroup          singleflight.Group
 }
 
 // TODO move to *Listener
@@ -335,7 +339,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 		TLSMismatches:         sync.Map{},
 		alpnsByDomain:         domainMatchers,
 		configBySNIALPN:       snialpnMatchers,
-		slowConfigBySNIALPN:   make(map[SNIALPN]*ConfigService),
+		dns:                   dnsresolver.New(),
+		slowConfigBySNIALPN:   make(map[SNIALPN]*dnsCacheEntry),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
@@ -1386,23 +1391,21 @@ func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
 // slowMatch handles non-static matches - such as ip-as-hostname, wildcard, and CNAME/SRV records
 func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []string) (SNIALPN, *ConfigService, error) {
 	{
-		var mcfg *ConfigService
-		var exists bool
 		snialpn := NewSNIALPN(domain, alpns[0])
 
 		lc.slowConfigMu.RLock()
-		if mcfg, exists = lc.slowConfigBySNIALPN[snialpn]; exists {
-			lc.slowConfigMu.RUnlock()
-			return snialpn, mcfg, nil
-		}
-		if len(alpns) > 1 {
-			// still happy path, e.g. "example.com:http/1.1"
+		entry, exists := lc.slowConfigBySNIALPN[snialpn]
+		if !exists && len(alpns) > 1 {
 			snialpn = NewSNIALPN(domain, alpns[1])
-			mcfg, exists = lc.slowConfigBySNIALPN[snialpn]
+			entry, exists = lc.slowConfigBySNIALPN[snialpn]
 		}
 		lc.slowConfigMu.RUnlock()
+
 		if exists {
-			return snialpn, mcfg, nil
+			svc, ok := lc.refreshCacheEntry(entry, conf, domain, alpns, snialpn)
+			if ok {
+				return snialpn, svc, nil
+			}
 		}
 	}
 
@@ -1447,7 +1450,7 @@ func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []st
 		subDomain = subDomain[1:]
 	}
 
-	route, err := lc.resolveRoute(conf, domain, alpns)
+	route, err := lc.resolveRoute(lc.Context, conf, domain, alpns)
 	if err != nil {
 		if err != errTryNext {
 			return "", nil, err
@@ -1465,8 +1468,60 @@ func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []st
 		domain,
 		strings.Join(alpns, ", "),
 	))
+}
 
-	// TODO net.LookupSRV("")
+func (lc *ListenConfig) refreshCacheEntry(entry *dnsCacheEntry, conf *Config, domain string, alpns []string, snialpn SNIALPN) (*ConfigService, bool) {
+	switch entry.state() {
+	case CacheFresh:
+		return entry.service, true
+	case CacheStale:
+		lc.resolveGroup.DoChan(domain, func() (any, error) {
+			lc.resolveOrExtend(conf, domain, alpns)
+			return nil, nil
+		})
+		return entry.service, true
+	case CacheExpired:
+		lc.resolveGroup.Do(domain, func() (any, error) {
+			lc.resolveOrExtend(conf, domain, alpns)
+			return nil, nil
+		})
+		lc.slowConfigMu.RLock()
+		entry = lc.slowConfigBySNIALPN[snialpn]
+		lc.slowConfigMu.RUnlock()
+		if entry != nil {
+			return entry.service, true
+		}
+	}
+	return nil, false
+}
+
+func (lc *ListenConfig) resolveOrExtend(conf *Config, domain string, alpns []string) {
+	ctx, cancel := context.WithTimeout(lc.Context, 5*time.Second)
+	defer cancel()
+
+	route, err := lc.resolveRoute(ctx, conf, domain, alpns)
+	if err == nil {
+		snialpn, svc := lc.buildService(conf, domain, route)
+		if cacheErr := lc.cacheService(snialpn, domain, svc, route, alpns); cacheErr == nil {
+			return
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "WARN: DNS refresh for %s failed: %v, extending cached entry\n", domain, err)
+
+	snialpn := NewSNIALPN(domain, alpns[0])
+	lc.slowConfigMu.Lock()
+	entry, exists := lc.slowConfigBySNIALPN[snialpn]
+	if !exists && len(alpns) > 1 {
+		snialpn = NewSNIALPN(domain, alpns[1])
+		entry, exists = lc.slowConfigBySNIALPN[snialpn]
+	}
+	if exists {
+		now := time.Now()
+		entry.staleAt = now.Add(minTTL)
+		entry.expiredAt = now.Add(minTTL + staleTTL)
+	}
+	lc.slowConfigMu.Unlock()
 }
 
 func newWrappedConn(conn net.Conn) *wrappedConn {
