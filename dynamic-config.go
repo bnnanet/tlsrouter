@@ -387,17 +387,12 @@ func findSrvForALPN(
 
 	for _, srv := range srvAddrs {
 		dbg("DEBUG: %s: %s %s: SRV record %#v", domain, service, proto, srv)
-		ip, terminate, port, checkErr := checkSRV(conf.IPDomains, conf.Networks, srv, domain, alpn)
-		dbg("DEBUG: %s: %s %s: SRV check %s, %t, %d, %v", domain, service, proto, ip, terminate, port, checkErr)
+		route, checkErr := checkSRV(conf.IPDomains, conf.Networks, srv, domain, alpn)
+		dbg("DEBUG: %s: %s %s: SRV check %v, %v", domain, service, proto, route, checkErr)
 		if checkErr != nil {
 			continue
 		}
-		return &dnsRoute{
-			IP:        ip,
-			ALPN:      alpn,
-			Port:      port,
-			Terminate: terminate,
-		}, nil
+		return route, nil
 	}
 
 	if service != alpn {
@@ -416,16 +411,16 @@ func findSrvForALPN(
 func checkSRV(
 	ipDomains []string,
 	networks []net.IPNet,
-	srv *net.SRV, domain,
+	srv *net.SRV,
+	domain string,
 	alpn string,
-) (net.IP, bool, uint16, error) {
-	// Validate SRV target format: [tls|tcp]-<dashed-ip>.<ip-domain>
+) (*dnsRoute, error) {
 	target := strings.TrimSuffix(srv.Target, ".")
 	terminate := true
 	prefix := "tls-"
 	if !strings.HasPrefix(target, "tls-") {
 		if !strings.HasPrefix(target, "tcp-") {
-			return nil, false, 0, errors.New("invalid SRV target prefix")
+			return nil, errors.New("invalid SRV target prefix")
 		}
 		terminate = false
 		prefix = "tcp-"
@@ -435,10 +430,10 @@ func checkSRV(
 	ipLabel := targetParts[0]
 
 	if len(targetParts) < 2 {
-		return nil, false, 0, errors.New("invalid SRV target labels")
+		return nil, errors.New("invalid SRV target labels")
 	}
 
-	// because some DNS providers (at least Digital Ocean) force the target to be a subdomain
+	// Some DNS providers (at least Digital Ocean) force the target to be a subdomain:
 	//   domain = "net.foo.com"
 	//   target = "tls-1-2-3-4.a.bnna.net.foo.com"
 	//   suffix = ".foo.com"
@@ -452,42 +447,38 @@ func checkSRV(
 		}
 	}
 	if !ok {
-		return nil, false, 0, errors.New("invalid SRV target suffix")
+		return nil, errors.New("invalid SRV target suffix")
 	}
 	if len(suffix) > 0 {
 		if suffix[0] != '.' {
-			return nil, false, 0, errors.New("invalid SRV target suffix")
+			return nil, errors.New("invalid SRV target suffix")
 		}
 		label, ok := strings.CutSuffix(domain, suffix[1:])
 		if !ok {
-			return nil, false, 0, errors.New("invalid SRV target parent domain")
+			return nil, errors.New("invalid SRV target parent domain")
 		}
 		if len(label) > 0 && label[len(label)-1] != '.' {
-			return nil, false, 0, errors.New("invalid SRV target parent domain")
+			return nil, errors.New("invalid SRV target parent domain")
 		}
 	}
 
-	// Extract and parse IP from target
 	ipLabel = strings.TrimPrefix(ipLabel, prefix)
 	ipLabel = strings.ReplaceAll(ipLabel, "-", ".")
 	ip := net.ParseIP(ipLabel)
 	if ip == nil {
-		return nil, false, 0, errors.New("invalid IP in SRV target")
+		return nil, errors.New("invalid IP in SRV target")
 	}
 
-	// Select port map based on terminate
 	portMap := terminatedPortMap
 	if !terminate {
 		portMap = rawPortMap
 	}
 
-	// Check if ALPN is supported and port matches
 	expectedPort, ok := portMap[alpn]
 	if !ok || srv.Port != expectedPort {
-		return nil, false, 0, errors.New("unsupported ALPN or port mismatch")
+		return nil, errors.New("unsupported ALPN or port mismatch")
 	}
 
-	// Check if IP is in allowed networks
 	allowed := false
 	for _, ipNet := range networks {
 		if ipNet.Contains(ip) {
@@ -496,8 +487,13 @@ func checkSRV(
 		}
 	}
 	if !allowed {
-		return nil, false, 0, ErrUnknownNetwork
+		return nil, ErrUnknownNetwork
 	}
 
-	return ip, terminate, expectedPort, nil
+	return &dnsRoute{
+		IP:        ip,
+		ALPN:      alpn,
+		Port:      expectedPort,
+		Terminate: terminate,
+	}, nil
 }
