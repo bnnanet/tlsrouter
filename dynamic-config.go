@@ -83,129 +83,116 @@ var terminatedPortMap = map[string]uint16{
 	"xmpp-server": 15269,
 }
 
+type dnsRoute struct {
+	IP        net.IP
+	ALPN      string
+	Port      uint16
+	Terminate bool
+}
+
 func dbg(tmpl string, args ...any) {
 	debugMux.Lock()
 	fmt.Printf(tmpl+"\n", args...)
 	debugMux.Unlock()
 }
 
-// check for ip-in-hostname
-func (lc *ListenConfig) getOrCreateHostConfig(
-	conf *Config,
-	domain string,
-	alpns []string,
-) (SNIALPN, *ConfigService, error) {
-	var selectedPort uint16
-	var selectedALPN string
-	var isSimpleDynamic bool
-
-	ip, terminate, selectedALPN, selectedPort, err := getAllowedIP(conf, domain, alpns)
+func (lc *ListenConfig) resolveRoute(conf *Config, domain string, alpns []string) (*dnsRoute, error) {
+	route, err := getAllowedIP(conf, domain, alpns)
 	if err != nil {
 		if err != errTryNext {
-			return "", nil, err
+			return nil, err
 		}
-		ip, terminate, selectedALPN, selectedPort, err = getAllowedSrv(conf, domain, alpns)
-		if err != nil && err != errTryNext {
-			return "", nil, err
+		route, err = getAllowedSrv(conf, domain, alpns)
+		if err != nil {
+			return nil, err
 		}
 	}
-	if ip != nil {
-		isSimpleDynamic = true
-	}
+	return route, nil
+}
 
-	// Create backend configuration
-	serviceSlug := strings.ReplaceAll(domain, ".", "-") + "-" + strings.Split(selectedALPN, "/")[0]
+func (lc *ListenConfig) buildService(conf *Config, domain string, route *dnsRoute) (SNIALPN, *ConfigService) {
+	serviceSlug := strings.ReplaceAll(domain, ".", "-") + "-" + strings.Split(route.ALPN, "/")[0]
 	backend := Backend{
-		Slug:          fmt.Sprintf("%s--%s", strings.ReplaceAll(ip.String(), ".", "-"), strings.Split(selectedALPN, "/")[0]),
-		Host:          ip.String() + ":" + strconv.Itoa(int(selectedPort)),
-		Address:       ip.String(),
-		Port:          selectedPort,
-		TerminateTLS:  terminate,
+		Slug:          fmt.Sprintf("%s--%s", strings.ReplaceAll(route.IP.String(), ".", "-"), strings.Split(route.ALPN, "/")[0]),
+		Host:          route.IP.String() + ":" + strconv.Itoa(int(route.Port)),
+		Address:       route.IP.String(),
+		Port:          route.Port,
+		TerminateTLS:  route.Terminate,
 		ConnectTLS:    false,
 		SkipTLSVerify: false,
 	}
 
-	// TODO check that a backend exists here
-	// (any cached slowMatchConfig should do since what triggers that triggers this)
-
-	// Match the static-config init path: HTTP-family terminated services get
-	// a ReverseProxy so X-Forwarded-* are re-set from the trusted inbound conn
-	// instead of passed through from the untrusted client.
-	if terminate && slices.Contains(HTTPFamilyALPNs, selectedALPN) {
+	// HTTP-family terminated services get a ReverseProxy so X-Forwarded-*
+	// headers are re-set from the trusted inbound conn instead of passed
+	// through from the untrusted client.
+	if route.Terminate && slices.Contains(HTTPFamilyALPNs, route.ALPN) {
 		lc.setupHTTPReverseProxy(domain, &backend, conf.TabVault)
 	}
 
-	// Create service configuration
 	service := &ConfigService{
 		Slug:                   serviceSlug,
 		Domains:                []string{domain},
-		ALPNs:                  []string{selectedALPN},
+		ALPNs:                  []string{route.ALPN},
 		Backends:               []Backend{backend},
-		CurrentBackend:         new(atomic.Uint32), // TODO make NewConfigService for this
+		CurrentBackend:         new(atomic.Uint32),
 		AllowedClientHostnames: []string{},
 	}
-	snialpn := NewSNIALPN(domain, selectedALPN)
+	snialpn := NewSNIALPN(domain, route.ALPN)
+	return snialpn, service
+}
 
-	{
-		// TODO these need to be able to expire
-		lc.slowConfigMu.Lock()
-		lc.slowConfigBySNIALPN[snialpn] = service
-		if terminate {
-			lc.slowCertmagicConfMap[domain] = struct{}{}
-		} else {
-			if isSimpleDynamic && backend.Port == 443 && slices.Contains(HTTPFamilyALPNs, alpns[0]) {
-				backendCopy := backend
-				lc.slowACMETLS1ByDomain[domain] = &backendCopy
-			}
-			// else {
-			// 	// TODO are there any conditions under which this would become ambiguous?
-			// 	// - 2+ protocols - we only handle this for http and ssh, so no worries there
-			// 	// - 2+ backends - such as multiple SRV records (not currently handled), no impact for CNAME
-			// 	// - advanced SRV - whatever handles 'posgresql' couldn't use ACMETLS currently
-			// }
-		}
-		lc.slowConfigMu.Unlock()
-		if terminate {
-			if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
-				return "", nil, err
-			}
+func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *ConfigService, route *dnsRoute, alpns []string) error {
+	lc.slowConfigMu.Lock()
+	lc.slowConfigBySNIALPN[snialpn] = service
+	if route.Terminate {
+		lc.slowCertmagicConfMap[domain] = struct{}{}
+	} else {
+		if route.Port == 443 && slices.Contains(HTTPFamilyALPNs, alpns[0]) {
+			backend := service.Backends[0]
+			lc.slowACMETLS1ByDomain[domain] = &backend
 		}
 	}
+	lc.slowConfigMu.Unlock()
 
-	return snialpn, service, nil
+	if route.Terminate {
+		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func getAllowedIP(
 	conf *Config,
 	domain string,
 	alpns []string,
-) (net.IP, bool, string, uint16, error) {
+) (*dnsRoute, error) {
 	if len(conf.Networks) == 0 {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: global config has no dynamic direct ip networks\n", domain)
-		return nil, false, "", 0, errTryNext
+		return nil, errTryNext
 	}
 
 	terminate := strings.HasPrefix(domain, "tls-")
 	if !terminate && !strings.HasPrefix(domain, "tcp-") {
-		return nil, false, "", 0, errTryNext
+		return nil, errTryNext
 	}
 
 	var ip net.IP
 	{
 		labelEnd := strings.IndexByte(domain, '.')
 		if labelEnd == -1 || len(domain) <= 6 {
-			return nil, false, "", 0, errTryNext
+			return nil, errTryNext
 		}
 		ipAddr := domain[4:labelEnd]
 		sld := domain[1+labelEnd:]
 		ipAddr = strings.ReplaceAll(ipAddr, "-", ".")
 		ip = net.ParseIP(ipAddr)
 		if ip == nil {
-			return nil, false, "", 0, errTryNext
+			return nil, errTryNext
 		}
 
 		if !slices.Contains(conf.IPDomains, sld) {
-			return nil, false, "", 0, errTryNext
+			return nil, errTryNext
 		}
 	}
 
@@ -221,10 +208,9 @@ func getAllowedIP(
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: IP %q is not in network %q\n", domain, ip.String(), ipNet.String())
 	}
 	if !match {
-		return nil, false, "", 0, errTryNext
+		return nil, errTryNext
 	}
 
-	// Determine primary ALPN (use http/1.1 if h2 is provided but http/1.1 is not)
 	if terminate {
 		for _, alpn := range alpns {
 			if port, ok := terminatedPortMap[alpn]; ok {
@@ -244,29 +230,23 @@ func getAllowedIP(
 		selectedALPN = "http/1.1"
 	}
 	if selectedALPN == "" {
-		return nil, false, "", 0, errTryNext
-		// return nil, false, "", 0,fmt.Errorf("no supported ALPN provided: %v", alpns)
+		return nil, errTryNext
 	}
-	return ip, terminate, selectedALPN, selectedPort, nil
+	return &dnsRoute{
+		IP:        ip,
+		ALPN:      selectedALPN,
+		Port:      selectedPort,
+		Terminate: terminate,
+	}, nil
 }
 
-// getAllowedSrv now returns the selected ALPN and port as well, since selection depends on available SRV records.
 func getAllowedSrv(
 	conf *Config,
 	domain string,
 	alpns []string,
-) (net.IP, bool, string, uint16, error) {
-	// Verify domain points to router: CNAME or A record matching conf.IPDomain
-	// Perform lookups in parallel for efficiency
-
+) (*dnsRoute, error) {
 	var cnameMatch bool
 	var ipMatch bool
-	type srvOption struct {
-		alpn      string
-		ip        net.IP
-		terminate bool
-		port      uint16
-	}
 
 	if len(alpns) > 3 {
 		alpns = alpns[:4]
@@ -276,7 +256,7 @@ func getAllowedSrv(
 	// options layout: [CNAME results | SRV results], same ALPN order in each half
 	cnameOffset := 0
 	srvOffset := alpnsLen
-	options := make([]*srvOption, alpnsLen+alpnsLen)
+	options := make([]*dnsRoute, alpnsLen+alpnsLen)
 
 	var wg sync.WaitGroup
 	ipQueries := 2
@@ -340,7 +320,12 @@ func getAllowedSrv(
 				continue
 			}
 			cnameMatch = true
-			options[cnameOffset+i] = &srvOption{alpn: alpn, ip: ip, terminate: terminate, port: port}
+			options[cnameOffset+i] = &dnsRoute{
+				IP:        ip,
+				ALPN:      alpn,
+				Port:      port,
+				Terminate: terminate,
+			}
 		}
 		dbg("DEBUG: %s: CNAME to ip: %d ALPNs, %s, terminate: %t", domain, len(alpns), ip.String(), terminate)
 	}()
@@ -365,8 +350,8 @@ func getAllowedSrv(
 		go func(alpn string, index int) {
 			defer wg.Done()
 
-			if ip, terminate, port, err := findSrvForALPN(conf, domain, alpn); err == nil {
-				options[srvOffset+index] = &srvOption{alpn: alpn, ip: ip, terminate: terminate, port: port}
+			if route, err := findSrvForALPN(conf, domain, alpn); err == nil {
+				options[srvOffset+index] = route
 			}
 		}(alpn, idx)
 	}
@@ -378,55 +363,54 @@ func getAllowedSrv(
 		for _, ip := range conf.IPs {
 			ipAddrs = append(ipAddrs, ip.String())
 		}
-		return nil, false, "", 0, fmt.Errorf("%q has no CNAME matching %q, nor A record matching any of %v", domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
+		return nil, fmt.Errorf("%q has no CNAME matching %q, nor A record matching any of %v", domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
 	}
 
 	for _, best := range options {
 		if best != nil {
-			return best.ip, best.terminate, best.alpn, best.port, nil
+			return best, nil
 		}
 	}
-	return nil, false, "", 0, errors.New("no matching SRV found for offered ALPNs")
+	return nil, errors.New("no matching SRV found for offered ALPNs")
 }
 
 func findSrvForALPN(
 	conf *Config,
 	domain string,
 	alpn string,
-) (net.IP, bool, uint16, error) {
+) (*dnsRoute, error) {
 	service := strings.ReplaceAll(strings.ReplaceAll(alpn, "/", "_"), ".", "-")
 
 	proto := "tcp"
 	_, srvAddrs, err := net.LookupSRV(service, proto, domain)
 	dbg("DEBUG: %s: %s %s: SRV len %d", domain, service, proto, len(srvAddrs))
 
-	// Start with the first SRV (sorted by priority/weight)
 	for _, srv := range srvAddrs {
 		dbg("DEBUG: %s: %s %s: SRV record %#v", domain, service, proto, srv)
-		ip, terminate, port, err := checkSRV(conf.IPDomains, conf.Networks, srv, domain, alpn)
-		dbg("DEBUG: %s: %s %s: SRV check %s, %t, %d, %v", domain, service, proto, ip, terminate, port, err)
-		if err != nil {
-			// TODO check... but there's nothing we could do
+		ip, terminate, port, checkErr := checkSRV(conf.IPDomains, conf.Networks, srv, domain, alpn)
+		dbg("DEBUG: %s: %s %s: SRV check %s, %t, %d, %v", domain, service, proto, ip, terminate, port, checkErr)
+		if checkErr != nil {
 			continue
 		}
-		return ip, terminate, port, nil
+		return &dnsRoute{
+			IP:        ip,
+			ALPN:      alpn,
+			Port:      port,
+			Terminate: terminate,
+		}, nil
 	}
 
 	if service != alpn {
-		// http/1.1 => http
-		// tds/8.0 => tds
-		// stun.turn => stun-turn
+		// http/1.1 => http, tds/8.0 => tds, stun.turn => stun-turn
 		service = strings.Split(alpn, "/")[0]
-		// no known ALPNs have both dots in the name and in versions,
-		// so this is just for future-proofing, ex: stun.turn/2.0
 		service = strings.ReplaceAll(service, ".", "-")
 		return findSrvForALPN(conf, domain, service)
 	}
 
 	if err != nil {
-		return nil, false, 0, err
+		return nil, err
 	}
-	return nil, false, 0, errTryNext
+	return nil, errTryNext
 }
 
 func checkSRV(

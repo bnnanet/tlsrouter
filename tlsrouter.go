@@ -1447,12 +1447,17 @@ func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []st
 		subDomain = subDomain[1:]
 	}
 
-	// SNIALPN, *ConfigService, error
-	snialpn, srvConf, err := lc.getOrCreateHostConfig(conf, domain, alpns)
-	if err == nil {
+	route, err := lc.resolveRoute(conf, domain, alpns)
+	if err != nil {
+		if err != errTryNext {
+			return "", nil, err
+		}
+	} else {
+		snialpn, srvConf := lc.buildService(conf, domain, route)
+		if err := lc.cacheService(snialpn, domain, srvConf, route, alpns); err != nil {
+			return "", nil, err
+		}
 		return snialpn, srvConf, nil
-	} else if err != errTryNext {
-		return "", nil, err
 	}
 
 	return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
