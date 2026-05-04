@@ -299,6 +299,7 @@ type ListenConfig struct {
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
 	resolveGroup          singleflight.Group
+	connTracker           *connTracker
 }
 
 func (lc *ListenConfig) SetIPFilter(f *IPFilter) {
@@ -314,6 +315,7 @@ func (lc *ListenConfig) Shutdown(ctx context.Context) {
 	_ = lc.netLn.Close()
 	// TODO create a context with a 5 second timeout and
 	_ = lc.adminServer.Shutdown(ctx)
+	lc.connTracker.Shutdown()
 	lc.done <- ctx
 }
 
@@ -360,6 +362,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		alpnsByDomain:         domainMatchers,
 		serviceBySNIALPN:      snialpnMatchers,
 		dns:                   dnsresolver.New(),
+		connTracker:           newConnTracker(),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
@@ -1272,6 +1275,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLED > Bad Gateway (Terminated)\n", snialpn)
 	}
 	fmt.Fprintf(os.Stderr, "DEBUG: %s: CLOSED\n", snialpn)
+	if backend != nil {
+		lc.connTracker.Track(snialpn.SNI(), backend.Address, wconn.BytesRead.Load(), wconn.BytesWritten.Load())
+	}
 	return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), retErr
 }
 

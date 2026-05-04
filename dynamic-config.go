@@ -184,14 +184,27 @@ func checkBackendReachable(ip string, port uint16) error {
 	if port != 22 {
 		targets = append(targets, net.JoinHostPort(ip, "22"))
 	}
+
+	success := make(chan struct{}, 1)
 	for _, addr := range targets {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
+		go func() {
+			conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				select {
+				case success <- struct{}{}:
+				default:
+				}
+			}
+		}()
 	}
-	return fmt.Errorf("tcp dial failed for %s on port %d and ssh", ip, port)
+
+	select {
+	case <-success:
+		return nil
+	case <-time.After(750 * time.Millisecond):
+		return fmt.Errorf("tcp dial failed for %s on port %d and ssh", ip, port)
+	}
 }
 
 func getAllowedIP(
