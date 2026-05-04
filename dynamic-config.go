@@ -2,7 +2,6 @@ package tlsrouter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -19,6 +18,11 @@ import (
 var errTryNext = fmt.Errorf("no worries, carry on")
 var errIPNotInNetwork = fmt.Errorf("target IP not in any allowed network")
 var errNoMatchingRecord = fmt.Errorf("no matching CNAME or SRV record")
+var errBackendUnreachable = fmt.Errorf("backend unreachable")
+var errDialFailed = fmt.Errorf("tcp dial failed")
+var errNoDNSMatch = fmt.Errorf("no CNAME or A record matches configured domains")
+var errInvalidSRVTarget = fmt.Errorf("invalid SRV target")
+var errUnsupportedALPN = fmt.Errorf("unsupported ALPN or port mismatch")
 
 // use standard ports for servers that natively handle internet traffic via TLS
 var rawPortMap = map[string]uint16{
@@ -172,7 +176,7 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 
 	if route.Terminate {
 		if err := checkBackendReachable(route.IP.String(), route.Port); err != nil {
-			return fmt.Errorf("backend unreachable for %s, skipping ACME: %w", domain, err)
+			return fmt.Errorf("%w for %s: %w", errBackendUnreachable, domain, err)
 		}
 		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 			return err
@@ -193,7 +197,7 @@ func checkBackendReachable(ip string, port uint16) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("tcp dial failed for %s on port %d and ssh", ip, port)
+	return fmt.Errorf("%w for %s on port %d and ssh", errDialFailed, ip, port)
 }
 
 func getAllowedIP(
@@ -388,7 +392,7 @@ func getAllowedSrv(
 		for _, ip := range conf.IPs {
 			ipAddrs = append(ipAddrs, ip.String())
 		}
-		return nil, fmt.Errorf("%q has no CNAME matching %q, nor A record matching any of %v", domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
+		return nil, fmt.Errorf("%w: %q has no CNAME matching %q, nor A record matching any of %v", errNoDNSMatch, domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
 	}
 
 	for _, best := range options {
@@ -460,7 +464,7 @@ func checkSRV(
 	prefix := "tls-"
 	if !strings.HasPrefix(target, "tls-") {
 		if !strings.HasPrefix(target, "tcp-") {
-			return nil, errors.New("invalid SRV target prefix")
+			return nil, fmt.Errorf("%w: expected tls- or tcp- prefix", errInvalidSRVTarget)
 		}
 		terminate = false
 		prefix = "tcp-"
@@ -470,7 +474,7 @@ func checkSRV(
 	ipLabel := targetParts[0]
 
 	if len(targetParts) < 2 {
-		return nil, errors.New("invalid SRV target labels")
+		return nil, fmt.Errorf("%w: missing domain labels", errInvalidSRVTarget)
 	}
 
 	// Some DNS providers (at least Digital Ocean) force the target to be a subdomain:
@@ -487,18 +491,18 @@ func checkSRV(
 		}
 	}
 	if !ok {
-		return nil, errors.New("invalid SRV target suffix")
+		return nil, fmt.Errorf("%w: suffix mismatch", errInvalidSRVTarget)
 	}
 	if len(suffix) > 0 {
 		if suffix[0] != '.' {
-			return nil, errors.New("invalid SRV target suffix")
+			return nil, fmt.Errorf("%w: suffix mismatch", errInvalidSRVTarget)
 		}
 		label, ok := strings.CutSuffix(domain, suffix[1:])
 		if !ok {
-			return nil, errors.New("invalid SRV target parent domain")
+			return nil, fmt.Errorf("%w: parent domain mismatch", errInvalidSRVTarget)
 		}
 		if len(label) > 0 && label[len(label)-1] != '.' {
-			return nil, errors.New("invalid SRV target parent domain")
+			return nil, fmt.Errorf("%w: parent domain mismatch", errInvalidSRVTarget)
 		}
 	}
 
@@ -506,7 +510,7 @@ func checkSRV(
 	ipLabel = strings.ReplaceAll(ipLabel, "-", ".")
 	ip := net.ParseIP(ipLabel)
 	if ip == nil {
-		return nil, errors.New("invalid IP in SRV target")
+		return nil, fmt.Errorf("%w: invalid IP", errInvalidSRVTarget)
 	}
 
 	portMap := terminatedPortMap
@@ -516,7 +520,7 @@ func checkSRV(
 
 	expectedPort, ok := portMap[alpn]
 	if !ok || srv.Port != expectedPort {
-		return nil, errors.New("unsupported ALPN or port mismatch")
+		return nil, errUnsupportedALPN
 	}
 
 	if !conf.IsAllowedIP(ip) {
