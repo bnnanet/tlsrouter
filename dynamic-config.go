@@ -16,8 +16,8 @@ import (
 	"github.com/bnnanet/tlsrouter/dnsresolver"
 )
 
-var ErrUnknownNetwork = fmt.Errorf("the target ip is not part of a known network")
 var errTryNext = fmt.Errorf("no worries, carry on")
+var errIPNotInNetwork = fmt.Errorf("target IP not in any allowed network")
 
 // use standard ports for servers that natively handle internet traffic via TLS
 var rawPortMap = map[string]uint16{
@@ -102,17 +102,23 @@ func dbg(tmpl string, args ...any) {
 }
 
 func (lc *ListenConfig) resolveRoute(ctx context.Context, conf *Config, domain string, alpns []string) (*dnsRoute, error) {
-	route, err := getAllowedIP(conf, domain, alpns)
-	if err != nil {
-		if err != errTryNext {
-			return nil, err
-		}
-		route, err = getAllowedSrv(ctx, lc.dns, conf, domain, alpns)
-		if err != nil {
-			return nil, err
-		}
+	route, ipErr := getAllowedIP(conf, domain, alpns)
+	if ipErr == nil {
+		return route, nil
 	}
-	return route, nil
+	if ipErr != errTryNext && ipErr != errIPNotInNetwork {
+		return nil, ipErr
+	}
+
+	route, srvErr := getAllowedSrv(ctx, lc.dns, conf, domain, alpns)
+	if srvErr == nil {
+		return route, nil
+	}
+
+	if ipErr == errIPNotInNetwork {
+		return nil, fmt.Errorf("%s: %w; also %w", domain, ipErr, srvErr)
+	}
+	return nil, errTryNext
 }
 
 func (lc *ListenConfig) buildService(conf *Config, domain string, route *dnsRoute) (SNIALPN, *ConfigService) {
@@ -164,11 +170,29 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 	lc.serviceMu.Unlock()
 
 	if route.Terminate {
+		if err := checkBackendReachable(route.IP.String(), route.Port); err != nil {
+			return fmt.Errorf("backend unreachable for %s, skipping ACME: %w", domain, err)
+		}
 		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func checkBackendReachable(ip string, port uint16) error {
+	targets := []string{net.JoinHostPort(ip, strconv.Itoa(int(port)))}
+	if port != 22 {
+		targets = append(targets, net.JoinHostPort(ip, "22"))
+	}
+	for _, addr := range targets {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+	}
+	return fmt.Errorf("tcp dial failed for %s on port %d and ssh", ip, port)
 }
 
 func getAllowedIP(
@@ -206,7 +230,7 @@ func getAllowedIP(
 	}
 
 	if !conf.IsAllowedIP(ip) {
-		return nil, errTryNext
+		return nil, errIPNotInNetwork
 	}
 
 	var selectedALPN string
@@ -374,7 +398,7 @@ func getAllowedSrv(
 			return best, nil
 		}
 	}
-	return nil, errors.New("no matching SRV found for offered ALPNs")
+	return nil, fmt.Errorf("no matching CNAME or SRV record for %q with offered ALPNs", domain)
 }
 
 func findSrvForALPN(
@@ -495,7 +519,7 @@ func checkSRV(
 	}
 
 	if !conf.IsAllowedIP(ip) {
-		return nil, ErrUnknownNetwork
+		return nil, errIPNotInNetwork
 	}
 
 	return &dnsRoute{
