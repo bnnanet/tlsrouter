@@ -102,22 +102,7 @@ func main() {
 			printVersion()
 			os.Exit(0)
 		case "help", "-help", "--help":
-			printVersion()
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "USAGE\n")
-			fmt.Fprintf(os.Stderr, "   tlsrouter <subcommand> [options]\n")
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "SUBCOMMANDS\n")
-			fmt.Fprintf(os.Stderr, "   run             Start the TLS router (default if no subcommand)\n")
-			fmt.Fprintf(os.Stderr, "   init            Create config directory and empty config files\n")
-			fmt.Fprintf(os.Stderr, "   hash-password   Hash a password for use in auth config\n")
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "EXAMPLES\n")
-			fmt.Fprintf(os.Stderr, "   tlsrouter init --admin-domain mgmt.example.com\n")
-			fmt.Fprintf(os.Stderr, "   tlsrouter run --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
-			fmt.Fprintf(os.Stderr, "   tlsrouter --port 8443\n")
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "Run 'tlsrouter <subcommand> --help' for subcommand-specific options.\n")
+			runServer([]string{"--help"})
 			os.Exit(0)
 		case "init":
 			os.Exit(runInit())
@@ -126,15 +111,12 @@ func main() {
 		case "hash-password":
 			os.Exit(runHashPassword())
 		default:
-			if strings.HasPrefix(os.Args[1], "-") {
-				os.Exit(runServer(os.Args[1:]))
-			}
 			fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
 
-	os.Exit(runServer(os.Args[1:]))
+	os.Exit(runServer(nil))
 }
 
 func runServer(args []string) int {
@@ -158,7 +140,13 @@ func runServer(args []string) int {
 		fmt.Fprintf(os.Stderr, "USAGE\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter run [options]\n")
 		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "SUBCOMMANDS\n")
+		fmt.Fprintf(os.Stderr, "   run             Start the TLS router (default)\n")
+		fmt.Fprintf(os.Stderr, "   init            Create config directory and empty config files\n")
+		fmt.Fprintf(os.Stderr, "   hash-password   Hash a password for use in auth config\n")
+		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "EXAMPLES\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter init --admin-domain mgmt.example.com\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter run --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter run --ip-blacklist-repo none\n")
 		fmt.Fprintf(os.Stderr, "\n")
