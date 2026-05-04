@@ -33,6 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/bnnanet/tlsrouter/dnsresolver"
+	"github.com/bnnanet/tlsrouter/internal/conntracker"
 	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
@@ -300,6 +301,7 @@ type ListenConfig struct {
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
 	resolveGroup          singleflight.Group
+	connTracker           *conntracker.Tracker
 }
 
 // TODO move to *Listener
@@ -307,6 +309,7 @@ func (lc *ListenConfig) Shutdown(ctx context.Context) {
 	_ = lc.netLn.Close()
 	// TODO create a context with a 5 second timeout and
 	_ = lc.adminServer.Shutdown(ctx)
+	lc.connTracker.Shutdown()
 	lc.done <- ctx
 }
 
@@ -318,7 +321,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 
 	certmagicStorage := conf.certmagicStorage
 	if certmagicStorage == nil {
-		certmagicStorage = &certmagic.FileStorage{Path: certmagicDataDir()}
+		certmagicStorage = &certmagic.FileStorage{Path: dataDir()}
 	}
 	certmagicCache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
@@ -355,6 +358,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		dns:                   dnsresolver.New(),
 		Blocklist:             ipgate.EmptyPrefixSet(),
 		AllowList:             ipgate.EmptyDomainSet(),
+		connTracker:           conntracker.New(dataDir()),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
@@ -888,7 +892,7 @@ func (lc *ListenConfig) newCertmagic(dnsProvider certmagic.DNSProvider) *certmag
 	return magic
 }
 
-func certmagicDataDir() string {
+func dataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
@@ -1266,6 +1270,9 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 		fmt.Fprintf(os.Stderr, "DEBUG: %s: HANDLED > Bad Gateway (Terminated)\n", snialpn)
 	}
 	fmt.Fprintf(os.Stderr, "DEBUG: %s: CLOSED\n", snialpn)
+	if backend != nil {
+		lc.connTracker.Track(snialpn.SNI(), backend.Address, wconn.BytesRead.Load(), wconn.BytesWritten.Load())
+	}
 	return int64(wconn.BytesRead.Load()), int64(wconn.BytesWritten.Load()), retErr
 }
 

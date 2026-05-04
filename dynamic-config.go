@@ -191,12 +191,22 @@ func checkBackendReachable(ip string, port uint16) error {
 	if port != 22 {
 		targets = append(targets, net.JoinHostPort(ip, "22"))
 	}
+
+	var reachable atomic.Bool
+	var wg sync.WaitGroup
 	for _, addr := range targets {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
+		wg.Go(func() {
+			conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				reachable.Store(true)
+			}
+		})
+	}
+	wg.Wait()
+
+	if reachable.Load() {
+		return nil
 	}
 	return fmt.Errorf("%w for %s on port %d and ssh", errDialFailed, ip, port)
 }
