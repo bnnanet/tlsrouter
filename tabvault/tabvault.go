@@ -42,16 +42,7 @@ func OpenOrCreate(filepath string) (*TabVault, error) {
 
 	// Check if file exists, create with header if not
 	if _, err := os.Stat(filepath); os.IsNotExist(err) {
-		file, err := os.Create(filepath)
-		if err != nil {
-			return nil, err
-		}
-		writer := csv.NewWriter(file)
-		writer.Comma = '\t'
-		_ = writer.Write([]string{"vault_id", "vault_secret"})
-		writer.Flush()
-
-		if err := file.Close(); err != nil {
+		if err := writeNewVault(filepath); err != nil {
 			return nil, err
 		}
 	}
@@ -91,6 +82,22 @@ func OpenOrCreate(filepath string) (*TabVault, error) {
 	return v, nil
 }
 
+func writeNewVault(filepath string) error {
+	file, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+
+	writer := csv.NewWriter(file)
+	writer.Comma = '\t'
+	if err := writer.Write([]string{"vault_id", "vault_secret"}); err != nil {
+		return err
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
 func (v *TabVault) ToVaultURI(s string) (string, error) {
 	if strings.HasPrefix(s, "vault://") {
 		return s, nil
@@ -123,6 +130,7 @@ func (v *TabVault) Add(secret string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer func() { _ = file.Close() }()
 
 	writer := csv.NewWriter(file)
 	writer.Comma = '\t'
@@ -130,11 +138,11 @@ func (v *TabVault) Add(secret string) (string, error) {
 		return "", err
 	}
 	writer.Flush()
-
-	if err := file.Sync(); err != nil {
+	if err := writer.Error(); err != nil {
 		return "", err
 	}
-	return id, file.Close()
+
+	return id, nil
 }
 
 var ErrNotFound = errors.New("vault entry not found")
@@ -159,20 +167,20 @@ func (v *TabVault) rewrite() error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = file.Close() }()
 
 	writer := csv.NewWriter(file)
 	writer.Comma = '\t'
-	_ = writer.Write([]string{"vault_id", "vault_secret"})
-	for id, secret := range v.secrets {
-		_ = writer.Write([]string{id, secret})
-	}
-	writer.Flush()
-
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
+	if err := writer.Write([]string{"vault_id", "vault_secret"}); err != nil {
 		return err
 	}
-	return file.Close()
+	for id, secret := range v.secrets {
+		if err := writer.Write([]string{id, secret}); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
 }
 
 func (v *TabVault) Get(id string) string {
