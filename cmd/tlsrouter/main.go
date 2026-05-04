@@ -95,7 +95,7 @@ func main() {
 	fs.IntVar(&cfg.port, "port", envOrInt("PORT", 443), "TLS port to listen on. -1 to disable.")
 	fs.IntVar(&cfg.plainPort, "plain-port", envOrInt("PLAIN_PORT", 80), "Plain (HTTP) port to listen on (for redirects). -1 to disable.")
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
-	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), "tlsrouter.csv"), "Path to config CSV file")
+	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), "backends.csv"), "Path to backends config CSV file")
 	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), "secrets.tsv"), "Path to vault TSV file")
 
 	fs.Usage = func() {
