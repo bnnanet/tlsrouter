@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,6 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/bnnanet/tlsrouter/dnsresolver"
+	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
@@ -291,6 +293,8 @@ type ListenConfig struct {
 	adminServer           *http.Server
 	netLn                 net.Listener
 	dns                   *dnsresolver.Resolver
+	Blocklist             *ipgate.PrefixSet
+	AllowList             *ipgate.DomainSet
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
@@ -348,6 +352,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 		alpnsByDomain:         domainMatchers,
 		serviceBySNIALPN:      snialpnMatchers,
 		dns:                   dnsresolver.New(),
+		Blocklist:             ipgate.EmptyPrefixSet(),
+		AllowList:             ipgate.EmptyDomainSet(),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
@@ -946,6 +952,15 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 	for {
 		select {
 		case conn := <-ch:
+			peer, parseErr := netip.ParseAddrPort(conn.RemoteAddr().String())
+			if parseErr == nil {
+				peerAddr := peer.Addr()
+				if lc.Blocklist.Contains(peerAddr) && !lc.AllowList.Contains(peerAddr) {
+					fmt.Fprintf(os.Stderr, "INFO: rejected %s (blacklisted)\n", peerAddr)
+					_ = conn.Close()
+					continue
+				}
+			}
 			fmt.Fprintf(os.Stderr, "\nDEBUG: (new): accepted %s\n", conn.RemoteAddr())
 			go func() {
 				_, _, err = lc.proxy(conn)

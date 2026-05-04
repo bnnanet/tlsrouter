@@ -23,10 +23,22 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
+	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
 	"github.com/joho/godotenv"
 )
+
+const defaultBlocklistRepo = "https://github.com/bitwire-it/ipblocklist.git"
+
+func defaultBlocklistPath() string {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, _ := os.UserHomeDir()
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dataHome, "bitwire-it", "ipblocklist")
+}
 
 const (
 	name         = "tlsrouter"
@@ -65,14 +77,17 @@ func printVersion() {
 }
 
 type MainConfig struct {
-	showVersion  bool
-	ipDomainList string
-	networkList  string
-	port         int
-	plainPort    int
-	bind         string
-	confPath     string
-	vaultPath    string
+	showVersion     bool
+	ipDomainList    string
+	networkList     string
+	port            int
+	plainPort       int
+	bind            string
+	confPath        string
+	vaultPath       string
+	ipWhitelistPath string
+	ipBlacklistDir  string
+	ipBlacklistRepo string
 }
 
 func main() {
@@ -98,6 +113,9 @@ func main() {
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
 	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), filepath.Join(defaultConfigDir(), "backends.csv")), "Path to backends config CSV file")
 	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), filepath.Join(defaultConfigDir(), "secrets.tsv")), "Path to vault TSV file")
+	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "Path to IP whitelist CSV file (IPs/CIDRs that bypass the blacklist)")
+	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
+	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
 
 	fs.Usage = func() {
 		printVersion()
@@ -182,6 +200,28 @@ func main() {
 	mux := http.NewServeMux()
 	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
+
+	if cfg.ipWhitelistPath != "" {
+		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
+		if err != nil {
+			if cfg.ipBlacklistRepo != "none" {
+				log.Fatalf("blacklist requires a whitelist for anti-lockout: %v", err)
+			}
+			log.Printf("WARN: ip-whitelist: %v (skipping)", err)
+		} else if allowList != nil {
+			lc.AllowList = allowList
+		}
+	}
+	if cfg.ipBlacklistRepo != "none" {
+		blocklist, err := ipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
+			"tables/inbound/single_ips.txt",
+			"tables/inbound/networks.txt",
+		})
+		if err != nil {
+			log.Fatalf("ip-blacklist: %v", err)
+		}
+		lc.Blocklist = blocklist
+	}
 
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", cfg.bind, cfg.port)
