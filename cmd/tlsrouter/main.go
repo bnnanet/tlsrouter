@@ -326,12 +326,20 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *htt
 func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string, networks []net.IPNet) (tlsrouter.Config, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			log.Printf("WARN: config %q not found — starting with empty config", filePath)
+			conf := &tlsrouter.Config{}
+			conf.FilePath = filePath
+			conf.TabVault = tabVault
+			conf.Networks = networks
+			conf.IPDomains = ipDomains
+			return *conf, nil
+		}
 		return tlsrouter.Config{}, err
 	}
 	defer func() { _ = file.Close() }()
 
 	reader := csv.NewReader(file)
-	//reader.Comma = '\t'
 	conf, err := tlsrouter.ReadCSVToConfig(reader)
 	if err != nil {
 		return tlsrouter.Config{}, fmt.Errorf("reading CSV %q: %w", filePath, err)
