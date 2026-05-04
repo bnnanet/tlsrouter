@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 )
 
-func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*ConfigService) {
+func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEntry) {
 	domainALPNMatchers := map[string][]string{}
-	snialpnMatchers := map[SNIALPN]*ConfigService{}
+	snialpnMatchers := map[SNIALPN]*dnsCacheEntry{}
 
 	for i, app := range conf.Apps {
 		for i, srv := range app.Services {
@@ -65,18 +65,19 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*ConfigServ
 
 					snialpn := NewSNIALPN(domain, alpn)
 
-					tlsMatch := snialpnMatchers[snialpn]
-					if tlsMatch == nil {
-						tlsMatch = &ConfigService{
-							CurrentBackend: new(atomic.Uint32),
+					entry := snialpnMatchers[snialpn]
+					if entry == nil {
+						entry = &dnsCacheEntry{
+							service: &ConfigService{
+								CurrentBackend: new(atomic.Uint32),
+							},
 						}
-						snialpnMatchers[snialpn] = tlsMatch
+						snialpnMatchers[snialpn] = entry
 					}
 
 					for _, b := range srv.Backends {
-						// fmt.Printf("\n\nDEBUG: m.Backends[i] %#v\n", b)
 						b.Host = fmt.Sprintf("%s:%d", b.Address, b.Port)
-						tlsMatch.Backends = append(tlsMatch.Backends, b)
+						entry.service.Backends = append(entry.service.Backends, b)
 					}
 				}
 			}

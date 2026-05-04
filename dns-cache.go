@@ -1,6 +1,9 @@
 package tlsrouter
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 const (
 	minTTL     = 30 * time.Second
@@ -19,19 +22,37 @@ const (
 
 type dnsCacheEntry struct {
 	service   *ConfigService
-	staleAt   time.Time
-	expiredAt time.Time
+	staleAt   atomic.Int64 // Unix seconds; zero means forever-fresh
+	expiresAt atomic.Int64 // Unix seconds; zero means never-expires
+}
+
+func newCacheEntry(service *ConfigService, staleAt, expiresAt time.Time) *dnsCacheEntry {
+	e := &dnsCacheEntry{service: service}
+	if !staleAt.IsZero() {
+		e.staleAt.Store(staleAt.Unix())
+		e.expiresAt.Store(expiresAt.Unix())
+	}
+	return e
 }
 
 func (e *dnsCacheEntry) state() CacheState {
-	now := time.Now()
-	if now.Before(e.staleAt) {
+	stale := e.staleAt.Load()
+	if stale == 0 {
 		return CacheFresh
 	}
-	if now.Before(e.expiredAt) {
+	now := time.Now().Unix()
+	if now < stale {
+		return CacheFresh
+	}
+	if now < e.expiresAt.Load() {
 		return CacheStale
 	}
 	return CacheExpired
+}
+
+func (e *dnsCacheEntry) extend(staleAt, expiresAt time.Time) {
+	e.staleAt.Store(staleAt.Unix())
+	e.expiresAt.Store(expiresAt.Unix())
 }
 
 func clampTTL(ttl uint32) time.Duration {

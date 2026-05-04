@@ -101,6 +101,15 @@ func (c *Config) ShortSHA2() string {
 	return "h" + hex.EncodeToString(h[:4])[:7]
 }
 
+func (c *Config) IsAllowedIP(ip net.IP) bool {
+	for _, ipNet := range c.Networks {
+		if ipNet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) SetSigChan(sigChan chan os.Signal) {
 	if c.sigChan != nil {
 		panic(errors.New("'sigChan' can only be set once"))
@@ -268,7 +277,7 @@ type ListenConfig struct {
 	Conns                 sync.Map
 	TLSMismatches         sync.Map
 	alpnsByDomain         map[string][]string
-	configBySNIALPN       map[SNIALPN]*ConfigService
+	serviceBySNIALPN      map[SNIALPN]*dnsCacheEntry
 	Context               context.Context
 	ACMEDirectoryEndpoint string
 	issuerConfMap         map[string]*ACMEDNS
@@ -284,8 +293,7 @@ type ListenConfig struct {
 	dns                   *dnsresolver.Resolver
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
-	slowConfigBySNIALPN   map[SNIALPN]*dnsCacheEntry
-	slowConfigMu          sync.RWMutex
+	serviceMu             sync.RWMutex
 	resolveGroup          singleflight.Group
 }
 
@@ -311,9 +319,9 @@ func NewListenConfig(conf Config) *ListenConfig {
 		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
 			magic, exists := lc.certmagicConfMap[cert.Names[0]] // len(Names) >= 0 is guaranteed
 			if !exists {
-				lc.slowConfigMu.RLock()
+				lc.serviceMu.RLock()
 				_, exists = lc.slowCertmagicConfMap[cert.Names[0]]
-				lc.slowConfigMu.RUnlock()
+				lc.serviceMu.RUnlock()
 
 				if !exists {
 					return nil, fmt.Errorf("impossible error: pre-configured domain %q is no longer configured", strings.Join(cert.Names, ", "))
@@ -338,9 +346,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 		Conns:                 sync.Map{},
 		TLSMismatches:         sync.Map{},
 		alpnsByDomain:         domainMatchers,
-		configBySNIALPN:       snialpnMatchers,
+		serviceBySNIALPN:      snialpnMatchers,
 		dns:                   dnsresolver.New(),
-		slowConfigBySNIALPN:   make(map[SNIALPN]*dnsCacheEntry),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
@@ -349,7 +356,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		certmagicTLSALPNOnly:  nil,
 		certmagicConfMap:      make(map[string]*certmagic.Config),
 		slowCertmagicConfMap:  make(map[string]struct{}),
-		slowConfigMu:          sync.RWMutex{},
+		serviceMu:             sync.RWMutex{},
 		certmagicStorage:      certmagicStorage,
 		certmagicCache:        certmagicCache,
 		done:                  make(chan context.Context),
@@ -537,8 +544,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 	// 	fmt.Fprintf(os.Stderr, "warning: ToS has not been agreed to\n")
 	// }
 
-	for snialpn, m := range snialpnMatchers {
-		for beIndex, backend := range m.Backends {
+	for snialpn, entry := range snialpnMatchers {
+		for beIndex, backend := range entry.service.Backends {
 			if !backend.TerminateTLS {
 				continue
 			}
@@ -558,7 +565,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 			fmt.Fprintf(os.Stderr, "DEBUG: %s: incoming snialpn %s\n", domain, alpn)
 			if alpn == "h2" || alpn == "h3" || alpn == "http/1.1" || backend.ForceHTTP {
 				lc.setupHTTPReverseProxy(domain, &backend, conf.TabVault)
-				m.Backends[beIndex] = backend
+				entry.service.Backends[beIndex] = backend
 			}
 		}
 	}
@@ -997,14 +1004,14 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				// note: certmagicConfMap only holds backends that terminate
 				magic := lc.certmagicConfMap[domain]
 				if magic == nil {
-					lc.slowConfigMu.RLock()
+					lc.serviceMu.RLock()
 					_, ok := lc.slowCertmagicConfMap[domain]
 					if ok {
 						magic = lc.certmagicTLSALPNOnly
 					} else {
 						backend = lc.slowACMETLS1ByDomain[domain]
 					}
-					lc.slowConfigMu.RUnlock()
+					lc.serviceMu.RUnlock()
 					if backend != nil {
 						var err error
 						if beConn, err = getBackendConn(lc.Context, backend.Host); err != nil {
@@ -1023,69 +1030,58 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				fmt.Fprintf(os.Stderr, "DEBUG: %s>%s: ACME TLS-ALPN falls through (no termination found)\n", domain, alpns[0])
 			}
 
-			// happy path, e.g. "example.com:h2"
-			snialpn = NewSNIALPN(domain, alpns[0])
-			mcfg, exists := lc.configBySNIALPN[snialpn]
-			if !exists {
-				if len(alpns) > 1 {
-					// still happy path, e.g. "example.com:http/1.1"
-					snialpn = NewSNIALPN(domain, alpns[1])
-					mcfg, exists = lc.configBySNIALPN[snialpn]
+			var mcfg *ConfigService
+			{
+				trackMismatch := func() {
+					key := domain + ":" + alpns[0]
+					vAny, ok := lc.TLSMismatches.Load(key)
+					if !ok {
+						vAny = &atomic.Int32{}
+						lc.TLSMismatches.Store(key, vAny)
+					}
+					v := vAny.(*atomic.Int32)
+					v.Add(1)
 				}
 
-				// unhappy path
-				if !exists {
-					trackMismatch := func() {
-						key := domain + ":" + alpns[0]
-						vAny, ok := lc.TLSMismatches.Load(key)
-						if !ok {
-							vAny = &atomic.Int32{}
-							lc.TLSMismatches.Store(key, vAny)
-						}
-						v := vAny.(*atomic.Int32)
-						v.Add(1)
+				var err error
+				snialpn, mcfg, err = lc.matchService(&conf, domain, alpns)
+				if err == nil {
+					fmt.Fprintf(os.Stderr, "DEBUG: %s: match: %s, %d backends\n", snialpn, strings.Join(mcfg.Domains, ", "), len(mcfg.Backends))
+				}
+				if err != nil {
+					snialpn = NewSNIALPN(domain, alpns[0])
+					fmt.Fprintf(os.Stderr, "DEBUG: %s>%s: match err: %#v\n", domain, alpns[0], err)
+					if !slices.Contains(conf.AdminDNS.Domains, domain) {
+						trackMismatch()
+						return nil, err
 					}
 
-					var err error
-					snialpn, mcfg, err = lc.slowMatchService(&conf, domain, alpns)
-					if err == nil {
-						fmt.Fprintf(os.Stderr, "DEBUG: %s: slowMatch: %s, %d backends\n", snialpn, strings.Join(mcfg.Domains, ", "), len(mcfg.Backends))
+					var clientALPN string
+					adminALPNs := []string{"h2", "http/1.1"}
+					for _, alpn := range hello.SupportedProtos {
+						if slices.Contains(adminALPNs, alpn) {
+							clientALPN = alpn
+							break
+						}
 					}
-					if err != nil {
-						snialpn = NewSNIALPN(domain, alpns[0])
-						fmt.Fprintf(os.Stderr, "DEBUG: %s>%s: slowMatch err: %#v\n", domain, alpns[0], err)
-						if !slices.Contains(conf.AdminDNS.Domains, domain) {
-							trackMismatch()
-							return nil, err
-						}
-
-						var clientALPN string
-						adminALPNs := []string{"h2", "http/1.1"}
-						for _, alpn := range hello.SupportedProtos {
-							if slices.Contains(adminALPNs, alpn) {
-								clientALPN = alpn
-								break
-							}
-						}
-						if len(clientALPN) == 0 {
-							trackMismatch()
-							return nil, err
-						}
-
-						backend = &Backend{
-							TerminateTLS: true,
-							HTTPTunnel:   lc.adminTunnel,
-						}
-						_ = wconn.Passthru()
-						if lc.certmagicConfMap[domain] == nil {
-							return nil, fmt.Errorf("SANITY FAIL: %s: missing ACME config", snialpn)
-						}
-						fmt.Fprintf(os.Stderr, "DEBUG: %s: returning tls.Config with admin certmagic m.GetCertificate\n", snialpn)
-						return &tls.Config{
-							GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
-							NextProtos:     []string{clientALPN},
-						}, nil
+					if len(clientALPN) == 0 {
+						trackMismatch()
+						return nil, err
 					}
+
+					backend = &Backend{
+						TerminateTLS: true,
+						HTTPTunnel:   lc.adminTunnel,
+					}
+					_ = wconn.Passthru()
+					if lc.certmagicConfMap[domain] == nil {
+						return nil, fmt.Errorf("SANITY FAIL: %s: missing ACME config", snialpn)
+					}
+					fmt.Fprintf(os.Stderr, "DEBUG: %s: returning tls.Config with admin certmagic m.GetCertificate\n", snialpn)
+					return &tls.Config{
+						GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
+						NextProtos:     []string{clientALPN},
+					}, nil
 				}
 			}
 
@@ -1142,11 +1138,11 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 			magic := lc.certmagicConfMap[domain]
 			if magic == nil {
-				lc.slowConfigMu.RLock()
+				lc.serviceMu.RLock()
 				if _, ok := lc.slowCertmagicConfMap[domain]; ok {
 					magic = lc.certmagicTLSALPNOnly
 				}
-				lc.slowConfigMu.RUnlock()
+				lc.serviceMu.RUnlock()
 				if magic == nil {
 					return nil, fmt.Errorf("SANITY FAIL: %s: found backend but missing ACME config", snialpn)
 				}
@@ -1388,18 +1384,17 @@ func getBackendConn(ctx context.Context, backendAddr string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", backendAddr)
 }
 
-// slowMatch handles non-static matches - such as ip-as-hostname, wildcard, and CNAME/SRV records
-func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []string) (SNIALPN, *ConfigService, error) {
+func (lc *ListenConfig) matchService(conf *Config, domain string, alpns []string) (SNIALPN, *ConfigService, error) {
 	{
 		snialpn := NewSNIALPN(domain, alpns[0])
 
-		lc.slowConfigMu.RLock()
-		entry, exists := lc.slowConfigBySNIALPN[snialpn]
+		lc.serviceMu.RLock()
+		entry, exists := lc.serviceBySNIALPN[snialpn]
 		if !exists && len(alpns) > 1 {
 			snialpn = NewSNIALPN(domain, alpns[1])
-			entry, exists = lc.slowConfigBySNIALPN[snialpn]
+			entry, exists = lc.serviceBySNIALPN[snialpn]
 		}
-		lc.slowConfigMu.RUnlock()
+		lc.serviceMu.RUnlock()
 
 		if exists {
 			svc, ok := lc.refreshCacheEntry(entry, conf, domain, alpns, snialpn)
@@ -1409,23 +1404,29 @@ func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []st
 		}
 	}
 
-	// we already checked the first two, if any
+	// ALPN fallback: check remaining ALPNs beyond the first two
 	if len(alpns) > 2 {
 		knownAlpns := lc.alpnsByDomain[domain]
 
 		for _, alpn := range alpns[2:] {
 			if slices.Contains(knownAlpns, alpn) {
 				snialpn := NewSNIALPN(domain, alpn)
-				return snialpn, lc.configBySNIALPN[snialpn], nil
+				lc.serviceMu.RLock()
+				entry := lc.serviceBySNIALPN[snialpn]
+				lc.serviceMu.RUnlock()
+				return snialpn, entry.service, nil
 			}
 		}
 		if slices.Contains(knownAlpns, "*") {
 			snialpn := NewSNIALPN(domain, "*")
-			return snialpn, lc.configBySNIALPN[snialpn], nil
+			lc.serviceMu.RLock()
+			entry := lc.serviceBySNIALPN[snialpn]
+			lc.serviceMu.RUnlock()
+			return snialpn, entry.service, nil
 		}
 	}
 
-	// treating ".example.com" is a wildcard
+	// wildcard: ".example.com" matches "sub.example.com"
 	subDomain := domain
 	for {
 		nextDot := strings.IndexByte(subDomain, '.')
@@ -1438,13 +1439,18 @@ func (lc *ListenConfig) slowMatchService(conf *Config, domain string, alpns []st
 		for _, alpn := range alpns {
 			if slices.Contains(knownAlpns, alpn) {
 				snialpn := NewSNIALPN(subDomain, alpn)
-				return snialpn, lc.configBySNIALPN[snialpn], nil
+				lc.serviceMu.RLock()
+				entry := lc.serviceBySNIALPN[snialpn]
+				lc.serviceMu.RUnlock()
+				return snialpn, entry.service, nil
 			}
 		}
-		isWild := slices.Contains(knownAlpns, "*")
-		if isWild {
+		if slices.Contains(knownAlpns, "*") {
 			snialpn := NewSNIALPN(subDomain, "*")
-			return snialpn, lc.configBySNIALPN[snialpn], nil
+			lc.serviceMu.RLock()
+			entry := lc.serviceBySNIALPN[snialpn]
+			lc.serviceMu.RUnlock()
+			return snialpn, entry.service, nil
 		}
 
 		subDomain = subDomain[1:]
@@ -1485,9 +1491,9 @@ func (lc *ListenConfig) refreshCacheEntry(entry *dnsCacheEntry, conf *Config, do
 			lc.resolveOrExtend(conf, domain, alpns)
 			return nil, nil
 		})
-		lc.slowConfigMu.RLock()
-		entry = lc.slowConfigBySNIALPN[snialpn]
-		lc.slowConfigMu.RUnlock()
+		lc.serviceMu.RLock()
+		entry = lc.serviceBySNIALPN[snialpn]
+		lc.serviceMu.RUnlock()
 		if entry != nil {
 			return entry.service, true
 		}
@@ -1510,18 +1516,17 @@ func (lc *ListenConfig) resolveOrExtend(conf *Config, domain string, alpns []str
 	fmt.Fprintf(os.Stderr, "WARN: DNS refresh for %s failed: %v, extending cached entry\n", domain, err)
 
 	snialpn := NewSNIALPN(domain, alpns[0])
-	lc.slowConfigMu.Lock()
-	entry, exists := lc.slowConfigBySNIALPN[snialpn]
+	lc.serviceMu.Lock()
+	entry, exists := lc.serviceBySNIALPN[snialpn]
 	if !exists && len(alpns) > 1 {
 		snialpn = NewSNIALPN(domain, alpns[1])
-		entry, exists = lc.slowConfigBySNIALPN[snialpn]
+		entry, exists = lc.serviceBySNIALPN[snialpn]
 	}
 	if exists {
 		now := time.Now()
-		entry.staleAt = now.Add(minTTL)
-		entry.expiredAt = now.Add(minTTL + staleTTL)
+		entry.extend(now.Add(minTTL), now.Add(minTTL+staleTTL))
 	}
-	lc.slowConfigMu.Unlock()
+	lc.serviceMu.Unlock()
 }
 
 func newWrappedConn(conn net.Conn) *wrappedConn {
