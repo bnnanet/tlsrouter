@@ -67,7 +67,7 @@ func (ps *PrefixSet) reload(ctx context.Context) error {
 
 	ps.cohort.Store(cohort)
 
-	fmt.Fprintf(os.Stderr, "INFO: ipgate: prefix set loaded %d entries\n", cohort.Size())
+	fmt.Fprintf(os.Stderr, "INFO: ipgate: prefix set loaded %s entries\n", commaify(cohort.Size()))
 	return nil
 }
 

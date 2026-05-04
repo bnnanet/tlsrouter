@@ -55,8 +55,8 @@ func NewDomainSet(ctx context.Context, csvPath string) (*DomainSet, error) {
 
 	ds.rebuildCohort()
 
-	fmt.Fprintf(os.Stderr, "INFO: ipgate: domain set %d static + %d domains from %s (resolving in background)\n",
-		len(staticPrefixes), len(domains), csvPath)
+	fmt.Fprintf(os.Stderr, "INFO: ipgate: domain set %s static + %s domains from %s (resolving in background)\n",
+		commaify(len(staticPrefixes)), commaify(len(domains)), csvPath)
 
 	go ds.refreshLoop(ctx)
 
