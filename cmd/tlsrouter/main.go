@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -62,6 +63,17 @@ func printVersion() {
 	fmt.Fprintf(os.Stderr, "Licensed under the %s license\n", licenseType)
 }
 
+type MainConfig struct {
+	showVersion  bool
+	ipDomainList string
+	networkList  string
+	port         int
+	plainPort    int
+	bind         string
+	confPath     string
+	vaultPath    string
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
 		os.Exit(runHashPassword())
@@ -74,78 +86,19 @@ func main() {
 		}
 	}
 
-	mainFlags := flag.NewFlagSet("", flag.ContinueOnError)
+	cfg := MainConfig{}
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
-	// --version
-	var showVersion bool
-	mainFlags.BoolVar(&showVersion, "version", false, "Print version and exit")
+	fs.BoolVar(&cfg.showVersion, "version", false, "Print version and exit")
+	fs.StringVar(&cfg.ipDomainList, "ip-domains", cmp.Or(os.Getenv("DYNAMIC_IP_DOMAIN"), "example.localdomain"), "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with these comma-separated base URLs")
+	fs.StringVar(&cfg.networkList, "networks", cmp.Or(os.Getenv("DYNAMIC_HOST_NETWORKS"), "169.254.0.0/16"), "enable dynamic ip url proxying (see --ip-domain) for these networks")
+	fs.IntVar(&cfg.port, "port", envOrInt("PORT", 443), "TLS port to listen on. -1 to disable.")
+	fs.IntVar(&cfg.plainPort, "plain-port", envOrInt("PLAIN_PORT", 80), "Plain (HTTP) port to listen on (for redirects). -1 to disable.")
+	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
+	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), "tlsrouter.csv"), "Path to config CSV file")
+	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), "secrets.tsv"), "Path to vault TSV file")
 
-	// Check DYNAMIC_IP_BASE_URL environment variable, override default if set
-	var ipDomainList string
-	defaultIPBaseURL := "example.localdomain"
-	if envNetworks := os.Getenv("DYNAMIC_IP_DOMAIN"); envNetworks != "" {
-		defaultIPBaseURL = envNetworks
-	}
-	mainFlags.StringVar(&ipDomainList, "ip-domains", defaultIPBaseURL, "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with these comma-separated base URLs")
-
-	// Check DYNAMIC_HOST_NETWORKS environment variable, override default if set
-	var networkList string
-	defaultNetworkList := "169.254.0.0/16"
-	if envNetworks := os.Getenv("DYNAMIC_HOST_NETWORKS"); envNetworks != "" {
-		defaultNetworkList = envNetworks
-	}
-	mainFlags.StringVar(&networkList, "networks", defaultNetworkList, "enable dynamic ip url proxying (see --ip-domain) for these networks")
-
-	// Check PORT environment variable, override default if set
-	var port int
-	defaultPort := 443
-	if envPort := os.Getenv("PORT"); envPort != "" {
-		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
-			defaultPort = p
-		} else {
-			fmt.Fprintf(os.Stderr, "warn: invalid PORT environment variable value: %s, using default or flag value\n", envPort)
-		}
-	}
-	mainFlags.IntVar(&port, "port", defaultPort, "TLS port to listen on. -1 to disable.")
-
-	// Check PLAIN_PORT environment variable, override default if set
-	var plainPort int
-	defaultPlainPort := 80
-	if envPlainPort := os.Getenv("PORT"); envPlainPort != "" {
-		if p, err := strconv.Atoi(envPlainPort); err == nil && p > 0 {
-			defaultPlainPort = p
-		} else {
-			fmt.Fprintf(os.Stderr, "warn: invalid PORT environment variable value: %s, using default or flag value\n", envPlainPort)
-		}
-	}
-	mainFlags.IntVar(&plainPort, "plain-port", defaultPlainPort, "Plain (HTTP) port to listen on (for redirects). -1 to disable.")
-
-	// Check BIND environment variable, override default if set
-	var bind string
-	defaultBind := "0.0.0.0"
-	if envBind := os.Getenv("BIND"); envBind != "" {
-		defaultBind = envBind
-	}
-	mainFlags.StringVar(&bind, "bind", defaultBind, "Address to bind to")
-
-	// Check BIND environment variable, override default if set
-	var confPath string
-	defaultConfPath := "tlsrouter.csv"
-	if envConfPath := os.Getenv("CONFIG_FILE"); envConfPath != "" {
-		defaultConfPath = envConfPath
-	}
-	mainFlags.StringVar(&confPath, "config", defaultConfPath, "Path to JSON config file")
-
-	// Check BIND environment variable, override default if set
-	var vaultPath string
-	defaultVaultPath := "secrets.tsv"
-	if envVaultPath := os.Getenv("VAULT_FILE"); envVaultPath != "" {
-		defaultVaultPath = envVaultPath
-	}
-	mainFlags.StringVar(&vaultPath, "vault", defaultVaultPath, "Path to vault TSV (Tab CSV) file")
-
-	// usage
-	mainFlags.Usage = func() {
+	fs.Usage = func() {
 		printVersion()
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "USAGE\n")
@@ -155,63 +108,54 @@ func main() {
 		fmt.Fprintf(os.Stderr, "   tlsrouter --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS\n")
-		mainFlags.PrintDefaults()
+		fs.PrintDefaults()
 	}
 
-	// pre-parse
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "-V", "version", "--version":
+		case "-V", "-version", "--version", "version":
 			printVersion()
 			return
-		}
-	}
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "help", "--help":
-			mainFlags.Usage()
+		case "help", "-help", "--help":
+			fs.Usage()
 			os.Exit(0)
 			return
 		}
 	}
 
-	// parse
-	if err := mainFlags.Parse(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-
-		mainFlags.Usage()
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		os.Exit(1)
-		return
 	}
 
-	// Handle --version flag after parsing
-	if showVersion {
+	if cfg.showVersion {
 		printVersion()
 		return
 	}
 
-	if plainPort >= 0 {
-		log.Printf("HTTP redirect listener starting on :80 → HTTPS (HTML meta)")
+	if cfg.plainPort >= 0 {
+		log.Printf("HTTP redirect listener starting on :%d → HTTPS (HTML meta)", cfg.plainPort)
 		go func() {
-			plainAddr := fmt.Sprintf("%s:%d", bind, plainPort)
+			plainAddr := fmt.Sprintf("%s:%d", cfg.bind, cfg.plainPort)
 			if err := tlsrouter.ListenAndRedirectPlainHTTP(plainAddr); err != http.ErrServerClosed {
 				log.Fatalf("HTTP redirect server error: %v", err)
 			}
 		}()
-		if port < 0 {
+		if cfg.port < 0 {
 			select {}
 		}
 	}
-	if port < 0 {
+	if cfg.port < 0 {
 		log.Printf("closing because neither --port nor --plain-port are positive")
 		return
 	}
 
-	// enabled dynamic ip networks
-	ipDomains := splitList(ipDomainList)
+	ipDomains := splitList(cfg.ipDomainList)
 
 	var networks []net.IPNet
-	for _, cidr := range splitList(networkList) {
+	for _, cidr := range splitList(cfg.networkList) {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invalid network %q: %v\n", cidr, err)
@@ -220,17 +164,16 @@ func main() {
 		networks = append(networks, *ipNet)
 	}
 
-	// Signal handling (must be have a buffer of at least 1)
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
 
-	tabVault, err := tabvault.OpenOrCreate(vaultPath)
+	tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 	if err != nil {
-		log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
+		log.Fatalf("Vault Error: %q\n%s\n", cfg.vaultPath, err)
 	}
-	conf, err := ReadConfig(confPath, tabVault, ipDomains, networks)
+	conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 	if err != nil {
-		log.Fatalf("Config Error: %q\n%s\n", confPath, err)
+		log.Fatalf("Config Error: %q\n%s\n", cfg.confPath, err)
 	}
 
 	conf.SetSigChan(sigChan)
@@ -240,7 +183,7 @@ func main() {
 	lc := tlsrouter.NewListenConfig(conf)
 
 	var wg sync.WaitGroup
-	addr := fmt.Sprintf("%s:%d", bind, port)
+	addr := fmt.Sprintf("%s:%d", cfg.bind, cfg.port)
 	_ = Start(&wg, lc, addr, mux)
 
 	go func() {
@@ -251,13 +194,13 @@ func main() {
 				log.Println("Received SIGUSR1, reloading config")
 
 				// TODO kill connections to management
-				tabVault, err := tabvault.OpenOrCreate(vaultPath)
+				tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 				if err != nil {
-					log.Fatalf("Vault Error: %q\n%s\n", vaultPath, err)
+					log.Fatalf("Vault Error: %q\n%s\n", cfg.vaultPath, err)
 				}
-				conf, err := ReadConfig(confPath, tabVault, ipDomains, networks)
+				conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 				if err != nil {
-					log.Fatalf("Config Error: %q\n%s\n", confPath, err)
+					log.Fatalf("Config Error: %q\n%s\n", cfg.confPath, err)
 				}
 				conf.SetSigChan(sigChan)
 				mux := http.NewServeMux()
@@ -287,6 +230,19 @@ func main() {
 	}()
 
 	wg.Wait()
+}
+
+func envOrInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		fmt.Fprintf(os.Stderr, "warn: invalid %s=%q, using default %d\n", key, v, fallback)
+		return fallback
+	}
+	return n
 }
 
 func splitList(s string) []string {
