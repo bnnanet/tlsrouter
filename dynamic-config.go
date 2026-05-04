@@ -155,8 +155,8 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 		expiredAt: now.Add(ttlDur + staleTTL),
 	}
 
-	lc.slowConfigMu.Lock()
-	lc.slowConfigBySNIALPN[snialpn] = entry
+	lc.serviceMu.Lock()
+	lc.serviceBySNIALPN[snialpn] = entry
 	if route.Terminate {
 		lc.slowCertmagicConfMap[domain] = struct{}{}
 	} else {
@@ -165,7 +165,7 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 			lc.slowACMETLS1ByDomain[domain] = &backend
 		}
 	}
-	lc.slowConfigMu.Unlock()
+	lc.serviceMu.Unlock()
 
 	if route.Terminate {
 		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
@@ -209,20 +209,12 @@ func getAllowedIP(
 		}
 	}
 
-	var selectedALPN string
-	var selectedPort uint16
-	var match bool
-	for _, ipNet := range conf.Networks {
-		if ipNet.Contains(ip) {
-			match = true
-			fmt.Fprintf(os.Stderr, "DEBUG: %s: found matching network %q\n", domain, ipNet.String())
-			break
-		}
-		fmt.Fprintf(os.Stderr, "DEBUG: %s: IP %q is not in network %q\n", domain, ip.String(), ipNet.String())
-	}
-	if !match {
+	if !conf.IsAllowedIP(ip) {
 		return nil, errTryNext
 	}
+
+	var selectedALPN string
+	var selectedPort uint16
 
 	if terminate {
 		for _, alpn := range alpns {
@@ -316,14 +308,7 @@ func getAllowedSrv(
 			return
 		}
 
-		allowed := false
-		for _, ipNet := range conf.Networks {
-			if ipNet.Contains(ip) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
+		if !conf.IsAllowedIP(ip) {
 			return
 		}
 
@@ -417,7 +402,7 @@ func findSrvForALPN(
 			Weight:   srv.Weight,
 		}
 		dbg("DEBUG: %s: %s %s: SRV record %#v", domain, service, proto, srvCompat)
-		route, checkErr := checkSRV(conf.IPDomains, conf.Networks, srvCompat, domain, alpn)
+		route, checkErr := checkSRV(conf, srvCompat, domain, alpn)
 		dbg("DEBUG: %s: %s %s: SRV check %v, %v", domain, service, proto, route, checkErr)
 		if checkErr != nil {
 			continue
@@ -444,8 +429,7 @@ func findSrvForALPN(
 }
 
 func checkSRV(
-	ipDomains []string,
-	networks []net.IPNet,
+	conf *Config,
 	srv *net.SRV,
 	domain string,
 	alpn string,
@@ -475,7 +459,7 @@ func checkSRV(
 	//   label = "net."
 	var suffix string
 	var ok bool
-	for _, ipDomain := range ipDomains {
+	for _, ipDomain := range conf.IPDomains {
 		suffix, ok = strings.CutPrefix(targetParts[1], ipDomain)
 		if ok {
 			break
@@ -514,14 +498,7 @@ func checkSRV(
 		return nil, errors.New("unsupported ALPN or port mismatch")
 	}
 
-	allowed := false
-	for _, ipNet := range networks {
-		if ipNet.Contains(ip) {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
+	if !conf.IsAllowedIP(ip) {
 		return nil, ErrUnknownNetwork
 	}
 
