@@ -94,6 +94,14 @@ VERIFY: script prints all `OK` — reachable gets 200, unreachable logs show
 `backend unreachable ... skipping ACME`, outside-network logs show
 `target IP not in any allowed network`
 
+## 6. Test connection tracker
+
+```sh
+./skills/tlsrouter-deploy-test/scripts/test-conntracker.sh TARGET_HOST TARGET_DOMAIN
+```
+
+VERIFY: script prints all `OK` — connections.tsv exists, has header, contains tracked domain
+
 ## Notes
 
 - Port 8443 or other non-standard ports may be firewalled. Test on the production port (443) with controlled blocklist data.

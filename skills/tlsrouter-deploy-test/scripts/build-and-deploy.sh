@@ -15,7 +15,7 @@ g_out="./agents/tmp/tlsrouter-linux-amd64"
 mkdir -p ./agents/tmp
 
 g_ldflags="-X main.version=$(git describe --tags --always) -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-GOOS=linux GOARCH=amd64 go build -ldflags "$g_ldflags" -o "$g_out" ./cmd/tlsrouter/
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2 go build -ldflags "$g_ldflags" -o "$g_out" ./cmd/tlsrouter/
 
 echo "Built: $(file "$g_out" | cut -d: -f2)"
 
