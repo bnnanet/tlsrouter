@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,8 +96,8 @@ func main() {
 	fs.IntVar(&cfg.port, "port", envOrInt("PORT", 443), "TLS port to listen on. -1 to disable.")
 	fs.IntVar(&cfg.plainPort, "plain-port", envOrInt("PLAIN_PORT", 80), "Plain (HTTP) port to listen on (for redirects). -1 to disable.")
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
-	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), "backends.csv"), "Path to backends config CSV file")
-	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), "secrets.tsv"), "Path to vault TSV file")
+	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), filepath.Join(defaultConfigDir(), "backends.csv")), "Path to backends config CSV file")
+	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), filepath.Join(defaultConfigDir(), "secrets.tsv")), "Path to vault TSV file")
 
 	fs.Usage = func() {
 		printVersion()
@@ -230,6 +231,15 @@ func main() {
 	}()
 
 	wg.Wait()
+}
+
+func defaultConfigDir() string {
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" {
+		home, _ := os.UserHomeDir()
+		configHome = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configHome, "tlsrouter")
 }
 
 func envOrInt(key string, fallback int) int {

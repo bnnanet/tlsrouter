@@ -5,7 +5,7 @@ A TLS Reverse Proxy for SNI and ALPN routing.
 Supports both static and dynamic TLS routing.
 
 ```sh
-go run ./cmd/tlsrouter/ \
+tlsrouter \
    --config ~/.config/tlsrouter/backends.csv \
    --vault ~/.config/tlsrouter/secrets.tsv \
    --ip-domains vm.example.com \
@@ -16,6 +16,30 @@ go run ./cmd/tlsrouter/ \
 
 Configured backends are loaded statically, while URLs like <https://tls-192-168-1-100.vm.example.com> are dynamically proxied -
 provided that the ip domain and ip-as-subdomain addresses match the allowed domain and networks.
+
+- `--config` — Path to backends config CSV file (default: `~/.config/tlsrouter/backends.csv`)
+- `--vault` — Path to vault TSV file (default: `~/.config/tlsrouter/secrets.tsv`)
+- `--ip-domains` — Comma-separated base domains for dynamic IP URLs (default: `example.localdomain`)
+- `--networks` — Allowed networks for dynamic IP proxying (default: `169.254.0.0/16`)
+- `--bind` — Address to bind to (default: `0.0.0.0`)
+- `--port` — TLS port to listen on; `-1` to disable (default: `443`)
+- `--plain-port` — Plain HTTP port for redirects; `-1` to disable (default: `80`)
+
+## Environment Variables
+
+All flags can be set via environment variables (flags take precedence):
+
+| Flag | Env Var | Default |
+| :--- | :------ | :------ |
+| `--port` | `PORT` | `443` |
+| `--plain-port` | `PLAIN_PORT` | `80` |
+| `--bind` | `BIND` | `0.0.0.0` |
+| `--config` | `CONFIG_FILE` | `~/.config/tlsrouter/backends.csv` |
+| `--vault` | `VAULT_FILE` | `~/.config/tlsrouter/secrets.tsv` |
+| `--ip-domains` | `DYNAMIC_IP_DOMAIN` | `example.localdomain` |
+| `--networks` | `DYNAMIC_HOST_NETWORKS` | `169.254.0.0/16` |
+
+A `.env` file in the working directory is loaded automatically.
 
 ## DNS Authorization
 
