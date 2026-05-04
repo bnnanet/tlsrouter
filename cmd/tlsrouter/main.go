@@ -91,9 +91,15 @@ type MainConfig struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
-		os.Exit(runHashPassword())
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "hash-password":
+			os.Exit(runHashPassword())
+			return
+		case "init":
+			os.Exit(runInit())
+			return
+		}
 	}
 
 	if err := godotenv.Load(".env"); err != nil {
@@ -123,7 +129,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "USAGE\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter [options]\n")
 		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "SUBCOMMANDS\n")
+		fmt.Fprintf(os.Stderr, "   init            Create config directory and empty config files\n")
+		fmt.Fprintf(os.Stderr, "   hash-password   Hash a password for use in auth config\n")
+		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "EXAMPLES\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter init --admin-domain mgmt.example.com\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS\n")
@@ -205,9 +216,11 @@ func main() {
 		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
-				log.Fatalf("blacklist requires a whitelist for anti-lockout: %v", err)
+				log.Printf("WARN: ip-whitelist: %v — blacklist disabled (no anti-lockout whitelist)", err)
+				cfg.ipBlacklistRepo = "none"
+			} else {
+				log.Printf("WARN: ip-whitelist: %v (skipping)", err)
 			}
-			log.Printf("WARN: ip-whitelist: %v (skipping)", err)
 		} else if allowList != nil {
 			lc.AllowList = allowList
 		}
@@ -218,9 +231,10 @@ func main() {
 			"tables/inbound/networks.txt",
 		})
 		if err != nil {
-			log.Fatalf("ip-blacklist: %v", err)
+			log.Printf("WARN: ip-blacklist: %v (skipping)", err)
+		} else {
+			lc.Blocklist = blocklist
 		}
-		lc.Blocklist = blocklist
 	}
 
 	var wg sync.WaitGroup
@@ -331,8 +345,7 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string
 	//reader.Comma = '\t'
 	conf, err := tlsrouter.ReadCSVToConfig(reader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading CSV: %v\n", err)
-		os.Exit(1)
+		return tlsrouter.Config{}, fmt.Errorf("reading CSV %q: %w", filePath, err)
 	}
 	conf.FilePath = filePath
 	conf.TabVault = tabVault
