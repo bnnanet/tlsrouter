@@ -169,11 +169,29 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 	lc.serviceMu.Unlock()
 
 	if route.Terminate {
+		if err := checkBackendReachable(route.IP.String(), route.Port); err != nil {
+			return fmt.Errorf("backend unreachable for %s, skipping ACME: %w", domain, err)
+		}
 		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func checkBackendReachable(ip string, port uint16) error {
+	targets := []string{net.JoinHostPort(ip, strconv.Itoa(int(port)))}
+	if port != 22 {
+		targets = append(targets, net.JoinHostPort(ip, "22"))
+	}
+	for _, addr := range targets {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+	}
+	return fmt.Errorf("tcp dial failed for %s on port %d and ssh", ip, port)
 }
 
 func getAllowedIP(
