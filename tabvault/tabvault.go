@@ -137,6 +137,44 @@ func (v *TabVault) Add(secret string) (string, error) {
 	return id, file.Close()
 }
 
+var ErrNotFound = errors.New("vault entry not found")
+
+func (v *TabVault) AppendToken(id string, token string) error {
+	id = strings.TrimPrefix(id, "vault://")
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	existing, ok := v.secrets[id]
+	if !ok {
+		return ErrNotFound
+	}
+
+	v.secrets[id] = existing + " " + token
+
+	return v.rewrite()
+}
+
+func (v *TabVault) rewrite() error {
+	file, err := os.Create(v.filepath)
+	if err != nil {
+		return err
+	}
+
+	writer := csv.NewWriter(file)
+	writer.Comma = '\t'
+	_ = writer.Write([]string{"vault_id", "vault_secret"})
+	for id, secret := range v.secrets {
+		_ = writer.Write([]string{id, secret})
+	}
+	writer.Flush()
+
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
 func (v *TabVault) Get(id string) string {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -163,6 +201,19 @@ func (v *TabVault) Verify(id string, password string) error {
 		return ErrInvalidCredentials
 	}
 
+	for token := range strings.SplitSeq(secret, " ") {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if verifyOne(token, password) == nil {
+			return nil
+		}
+	}
+	return ErrInvalidCredentials
+}
+
+func verifyOne(secret, password string) error {
 	if !strings.HasPrefix(secret, phcPrefix) {
 		return BasicAuthPassword(secret).Verify("", password)
 	}

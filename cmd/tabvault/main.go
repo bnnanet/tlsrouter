@@ -15,7 +15,7 @@ import (
 func main() {
 	mainFlags := flag.NewFlagSet("", flag.ContinueOnError)
 	mainFlags.Usage = func() {
-		fmt.Println("Usage:\ntouch ./path/to/secrets.tsv\ntabvault ./path/to/secrets.tsv new\ntabvault ./path/to/secrets.tsv add < ./secret.txt\ntabvault ./path/to/secrets.tsv verify <vault-id> < ./password.txt")
+		fmt.Println("Usage:\ntouch ./path/to/secrets.tsv\ntabvault ./path/to/secrets.tsv new\ntabvault ./path/to/secrets.tsv add < ./secret.txt\ntabvault ./path/to/secrets.tsv append <vault-id> < ./token.txt\ntabvault ./path/to/secrets.tsv verify <vault-id> < ./password.txt")
 		mainFlags.PrintDefaults()
 	}
 	if err := mainFlags.Parse(os.Args[1:]); err != nil {
@@ -48,6 +48,18 @@ func main() {
 		fmt.Println(secret)
 	case "add":
 		secret = readSecret()
+	case "append":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: tabvault <vault-file> append <vault-id>")
+			os.Exit(1)
+		}
+		token := readSecret()
+		if err := tabVault.AppendToken(args[2], token); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "OK")
+		os.Exit(0)
 	case "verify":
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: tabvault <vault-file> verify <vault-id>")
