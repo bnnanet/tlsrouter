@@ -18,6 +18,7 @@ import (
 
 var errTryNext = fmt.Errorf("no worries, carry on")
 var errIPNotInNetwork = fmt.Errorf("target IP not in any allowed network")
+var errNoMatchingRecord = fmt.Errorf("no matching CNAME or SRV record")
 
 // use standard ports for servers that natively handle internet traffic via TLS
 var rawPortMap = map[string]uint16{
@@ -398,7 +399,7 @@ func getAllowedSrv(
 			return best, nil
 		}
 	}
-	return nil, fmt.Errorf("no matching CNAME or SRV record for %q with offered ALPNs", domain)
+	return nil, fmt.Errorf("%w for %q with offered ALPNs", errNoMatchingRecord, domain)
 }
 
 func findSrvForALPN(
