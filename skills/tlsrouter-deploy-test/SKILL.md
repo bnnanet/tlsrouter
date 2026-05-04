@@ -174,6 +174,42 @@ VERIFY: production service healthy
 curl -sS --connect-timeout 3 https://TARGET_DOMAIN/api/version
 ```
 
+## 8. Test ACME reachability check
+
+The reachability check prevents wasted ACME attempts against unreachable backends.
+Requires `--networks` to include the target subnet and `--ip-domains` to match the SLD.
+
+### 8a. Reachable backend succeeds
+
+```sh
+curl -sS --connect-timeout 5 https://tls-10-0-2-21.TARGET_DOMAIN/ -o /dev/null -w "%{http_code}\n"
+# expect: 200 (backend is up, ACME succeeds)
+```
+
+### 8b. Unreachable backend in allowed network
+
+```sh
+curl -sS --connect-timeout 10 https://tls-10-0-2-249.TARGET_DOMAIN/ -o /dev/null -w "%{http_code}\n"
+# expect: SSL error (connection reset)
+```
+
+VERIFY: logs show `backend unreachable for ... skipping ACME`
+```sh
+ssh TARGET_HOST "sudo journalctl -u tlsrouter --since '30 sec ago' --no-pager | grep unreachable"
+```
+
+### 8c. IP outside allowed networks
+
+```sh
+curl -sS --connect-timeout 10 https://tls-10-249-249-249.TARGET_DOMAIN/ -o /dev/null -w "%{http_code}\n"
+# expect: SSL error (connection reset)
+```
+
+VERIFY: logs show `target IP not in any allowed network`
+```sh
+ssh TARGET_HOST "sudo journalctl -u tlsrouter --since '30 sec ago' --no-pager | grep 'not in any allowed'"
+```
+
 ## Notes
 
 - Port 8443 or other non-standard ports may be firewalled. Test on the production port (443) with controlled blocklist data.
