@@ -205,9 +205,11 @@ func main() {
 		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
-				log.Fatalf("blacklist requires a whitelist for anti-lockout: %v", err)
+				log.Printf("WARN: ip-whitelist: %v — blacklist disabled (no anti-lockout whitelist)", err)
+				cfg.ipBlacklistRepo = "none"
+			} else {
+				log.Printf("WARN: ip-whitelist: %v (skipping)", err)
 			}
-			log.Printf("WARN: ip-whitelist: %v (skipping)", err)
 		} else if allowList != nil {
 			lc.AllowList = allowList
 		}
@@ -218,9 +220,10 @@ func main() {
 			"tables/inbound/networks.txt",
 		})
 		if err != nil {
-			log.Fatalf("ip-blacklist: %v", err)
+			log.Printf("WARN: ip-blacklist: %v (skipping)", err)
+		} else {
+			lc.Blocklist = blocklist
 		}
-		lc.Blocklist = blocklist
 	}
 
 	var wg sync.WaitGroup
@@ -331,8 +334,7 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string
 	//reader.Comma = '\t'
 	conf, err := tlsrouter.ReadCSVToConfig(reader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading CSV: %v\n", err)
-		os.Exit(1)
+		return tlsrouter.Config{}, fmt.Errorf("reading CSV %q: %w", filePath, err)
 	}
 	conf.FilePath = filePath
 	conf.TabVault = tabVault
