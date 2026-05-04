@@ -135,6 +135,7 @@ func (lc *ListenConfig) buildService(conf *Config, domain string, route *dnsRout
 		Port:          route.Port,
 		TerminateTLS:  route.Terminate,
 		ConnectTLS:    false,
+		RewriteHost:   "",
 		SkipTLSVerify: false,
 	}
 

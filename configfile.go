@@ -196,6 +196,7 @@ var expectedHeaders = []string{
 	"backend_port",
 	"terminate_tls",
 	"connect_tls",
+	"rewrite_host",
 	"skip_tls_verify",
 	"auth",
 	"allowed_client_hostnames",
@@ -267,6 +268,10 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 		connectTLS := false
 		if i, ok := headerIndices["connect_tls"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
 			connectTLS = true
+		}
+		rewriteHost := ""
+		if i, ok := headerIndices["rewrite_host"]; ok && i < len(record) {
+			rewriteHost = record[i]
 		}
 		connectInsecure := false
 		if i, ok := headerIndices["skip_tls_verify"]; ok && i < len(record) && strings.ToLower(record[i]) == "true" {
@@ -392,6 +397,7 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 				Port:          port,
 				TerminateTLS:  terminateTLS,
 				ConnectTLS:    connectTLS,
+				RewriteHost:   rewriteHost,
 				SkipTLSVerify: connectInsecure,
 				AuthToken:     authToken,
 			}
@@ -432,6 +438,7 @@ type CSVRecord struct {
 	BackendPort            uint16
 	TerminateTLS           bool
 	ConnectTLS             bool
+	RewriteHost            string
 	SkipTLSVerify          bool
 	Auth                   string
 	AllowedClientHostnames string
@@ -464,6 +471,7 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 							BackendPort:            backend.Port,
 							TerminateTLS:           backend.TerminateTLS,
 							ConnectTLS:             backend.ConnectTLS,
+							RewriteHost:            backend.RewriteHost,
 							SkipTLSVerify:          backend.SkipTLSVerify,
 							Auth:                   backend.AuthToken,
 							AllowedClientHostnames: strings.Join(service.AllowedClientHostnames, ";"),
@@ -503,6 +511,9 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 		if a.ConnectTLS != b.ConnectTLS {
 			return strings.Compare(fmt.Sprintf("%t", a.ConnectTLS), fmt.Sprintf("%t", b.ConnectTLS))
 		}
+		if a.RewriteHost != b.RewriteHost {
+			return strings.Compare(a.RewriteHost, b.RewriteHost)
+		}
 		if a.SkipTLSVerify != b.SkipTLSVerify {
 			return strings.Compare(fmt.Sprintf("%t", a.SkipTLSVerify), fmt.Sprintf("%t", b.SkipTLSVerify))
 		}
@@ -532,6 +543,7 @@ func RecordsToCSV(csvw *csv.Writer, records []CSVRecord) error {
 			fmt.Sprintf("%d", record.BackendPort),
 			fmt.Sprintf("%t", record.TerminateTLS),
 			fmt.Sprintf("%t", record.ConnectTLS),
+			record.RewriteHost,
 			fmt.Sprintf("%t", record.SkipTLSVerify),
 			record.Auth,
 			record.AllowedClientHostnames,

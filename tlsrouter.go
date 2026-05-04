@@ -237,6 +237,7 @@ type Backend struct {
 	TerminateTLS  bool               `json:"terminate_tls"`
 	ForceHTTP     bool               `json:"force_http,omitempty"`
 	ConnectTLS    bool               `json:"connect_tls"`
+	RewriteHost   string             `json:"rewrite_host,omitempty"`
 	SkipTLSVerify bool               `json:"connect_insecure"`
 	AuthToken     string             `json:"auth_token,omitempty"`
 	// Healthy         *atomic.Bool       `json:"-"`
@@ -606,12 +607,18 @@ func (lc *ListenConfig) setupHTTPReverseProxy(domain string, backend *Backend, v
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
-			if backend.ConnectTLS {
+			switch strings.ToLower(backend.RewriteHost) {
+			case "", "false":
+				r.Out.Host = r.In.Host
+			case "true":
 				inHost := r.In.Host
 				rewriteHeaderHost(r.Out.Header, "Referer", inHost, target.Host)
 				rewriteHeaderHost(r.Out.Header, "Origin", inHost, target.Host)
-			} else {
-				r.Out.Host = r.In.Host // preserve original Host for plaintext backends
+			default:
+				inHost := r.In.Host
+				r.Out.Host = backend.RewriteHost
+				rewriteHeaderHost(r.Out.Header, "Referer", inHost, backend.RewriteHost)
+				rewriteHeaderHost(r.Out.Header, "Origin", inHost, backend.RewriteHost)
 			}
 			r.Out.Header.Del("X-Real-IP") // not auto-stripped
 			// We are the trust boundary: r.In.RemoteAddr is the real
