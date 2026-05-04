@@ -144,6 +144,12 @@ func main() {
 	}
 	mainFlags.StringVar(&vaultPath, "vault", defaultVaultPath, "Path to vault TSV (Tab CSV) file")
 
+	var ipWhitelistPath string
+	mainFlags.StringVar(&ipWhitelistPath, "ip-whitelist", "", "Path to IP whitelist CSV file (IPs/CIDRs allowed to connect)")
+
+	var ipBlacklistPath string
+	mainFlags.StringVar(&ipBlacklistPath, "ip-blacklist", "", "Path to IP blacklist data directory (git-managed, requires --ip-whitelist)")
+
 	// usage
 	mainFlags.Usage = func() {
 		printVersion()
@@ -238,6 +244,24 @@ func main() {
 	mux := http.NewServeMux()
 	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
+
+	if ipBlacklistPath != "" && ipWhitelistPath == "" {
+		log.Fatal("--ip-blacklist requires --ip-whitelist (anti-lockout)")
+	}
+	if ipWhitelistPath != "" {
+		ipFilter, err := tlsrouter.NewIPFilter(lc.Context, ipWhitelistPath)
+		if err != nil {
+			log.Fatalf("ip-whitelist: %v", err)
+		}
+		lc.SetIPFilter(ipFilter)
+	}
+	if ipBlacklistPath != "" {
+		bl, err := tlsrouter.NewIPBlocklist(lc.Context, ipBlacklistPath)
+		if err != nil {
+			log.Fatalf("ip-blacklist: %v", err)
+		}
+		lc.SetIPBlocklist(bl)
+	}
 
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", bind, port)

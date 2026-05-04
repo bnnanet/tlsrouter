@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -291,10 +292,20 @@ type ListenConfig struct {
 	adminServer           *http.Server
 	netLn                 net.Listener
 	dns                   *dnsresolver.Resolver
+	blocklist             *IPBlocklist
+	ipFilter              *IPFilter
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
 	resolveGroup          singleflight.Group
+}
+
+func (lc *ListenConfig) SetIPFilter(f *IPFilter) {
+	lc.ipFilter = f
+}
+
+func (lc *ListenConfig) SetIPBlocklist(bl *IPBlocklist) {
+	lc.blocklist = bl
 }
 
 // TODO move to *Listener
@@ -947,6 +958,16 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 		select {
 		case conn := <-ch:
 			fmt.Fprintf(os.Stderr, "\nDEBUG: (new): accepted %s\n", conn.RemoteAddr())
+			peer, parseErr := netip.ParseAddrPort(conn.RemoteAddr().String())
+			if parseErr == nil {
+				peerAddr := peer.Addr()
+				whitelisted := lc.ipFilter != nil && lc.ipFilter.IsAllowed(peerAddr)
+				if !whitelisted && lc.blocklist != nil && lc.blocklist.IsBlockedInbound(peerAddr) {
+					fmt.Fprintf(os.Stderr, "INFO: rejected %s (blacklisted)\n", peerAddr)
+					_ = conn.Close()
+					continue
+				}
+			}
 			go func() {
 				_, _, err = lc.proxy(conn)
 				if err != nil {

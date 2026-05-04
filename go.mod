@@ -1,6 +1,6 @@
 module github.com/bnnanet/tlsrouter
 
-go 1.25.6
+go 1.26.0
 
 tool github.com/therootcompany/golib/io/transform/gsheet2csv/cmd/gsheet2csv
 
@@ -20,6 +20,8 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/therootcompany/golib/io/transform/gsheet2csv v1.0.3 // indirect
+	github.com/therootcompany/golib/net/gitshallow v0.9.0 // indirect
+	github.com/therootcompany/golib/net/ipcohort v0.9.0 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect

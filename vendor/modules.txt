@@ -31,6 +31,12 @@ github.com/pires/go-proxyproto
 ## explicit; go 1.24.6
 github.com/therootcompany/golib/io/transform/gsheet2csv
 github.com/therootcompany/golib/io/transform/gsheet2csv/cmd/gsheet2csv
+# github.com/therootcompany/golib/net/gitshallow v0.9.0
+## explicit; go 1.26.0
+github.com/therootcompany/golib/net/gitshallow
+# github.com/therootcompany/golib/net/ipcohort v0.9.0
+## explicit; go 1.26.0
+github.com/therootcompany/golib/net/ipcohort
 # github.com/zeebo/blake3 v0.2.4
 ## explicit; go 1.18
 github.com/zeebo/blake3
