@@ -1117,44 +1117,27 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 					strings.Join(b.ALPNs, ", "), b.Host, b.Address, b.Port, b.TerminateTLS, b.PROXYProto)
 			}
 
-			var inc uint32 = 1
-			n := uint32(len(mcfg.Backends)) - inc
-			for {
-				// simple round robin
-				b := mcfg.Backends[mcfg.CurrentBackend.Load()]
-				if !mcfg.CurrentBackend.CompareAndSwap(n, 0) {
-					mcfg.CurrentBackend.Add(inc)
-				}
-
-				// Note: this complexity currently doesn't help us
-				//       but in the future we do need a way to mark
-				//       a backend as active or inactive
+			backends := mcfg.Backends
+			n := uint32(len(backends))
+			start := mcfg.CurrentBackend.Add(1) - 1 // atomic increment, get previous value
+			for attempt := uint32(0); attempt < n; attempt++ {
+				idx := (start + attempt) % n
+				b := backends[idx]
 
 				backend = &b
+
+				if b.HTTPTunnel != nil {
+					beConn = nil
+					break
+				}
 
 				var err error
 				beConn, err = getBackendConn(lc.Context, b.Host)
 				if err != nil {
-					// TODO mark as inactive and try next
-					//backend = nil
 					fmt.Fprintf(os.Stderr, "DEBUG: %s: could not connect to backend %q\n", snialpn, b.Host)
-					// fallthrough: try to the next backend
+					continue
 				}
-
-				usesTunnel := b.HTTPTunnel != nil
-				if usesTunnel {
-					if beConn != nil {
-						_ = beConn.Close()
-					}
-					beConn = nil // we can't use raw beConn with internal or proxy tunnel
-					break
-				}
-
-				// TODO try the next backend
-				hideAlwaysTrueFromLinterWhileDeving := beConn == nil || beConn != nil
-				if hideAlwaysTrueFromLinterWhileDeving {
-					break
-				}
+				break
 			}
 
 			if !backend.TerminateTLS {
