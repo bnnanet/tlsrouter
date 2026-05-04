@@ -133,7 +133,7 @@ func LintConfig(conf *Config, allowedAlpns []string) error {
 			break
 		}
 	}
-	if !hasActiveService {
+	if !hasActiveService && len(conf.IPDomains) == 0 {
 		// TODO once we can edit the config via API, this is not a problem
 		return fmt.Errorf("error: no 'apps' with active (non-disabled) 'services'")
 	}
