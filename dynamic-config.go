@@ -19,6 +19,8 @@ import (
 var errTryNext = fmt.Errorf("no worries, carry on")
 var errIPNotInNetwork = fmt.Errorf("target IP not in any allowed network")
 var errNoMatchingRecord = fmt.Errorf("no matching CNAME or SRV record")
+var errBackendUnreachable = fmt.Errorf("backend unreachable, skipping ACME")
+var errDialFailed = fmt.Errorf("tcp dial failed")
 
 // use standard ports for servers that natively handle internet traffic via TLS
 var rawPortMap = map[string]uint16{
@@ -172,7 +174,7 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 
 	if route.Terminate {
 		if err := checkBackendReachable(route.IP.String(), route.Port); err != nil {
-			return fmt.Errorf("backend unreachable for %s, skipping ACME: %w", domain, err)
+			return fmt.Errorf("%w for %s: %w", errBackendUnreachable, domain, err)
 		}
 		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
 			return err
@@ -193,7 +195,7 @@ func checkBackendReachable(ip string, port uint16) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("tcp dial failed for %s on port %d and ssh", ip, port)
+	return fmt.Errorf("%w for %s on port %d and ssh", errDialFailed, ip, port)
 }
 
 func getAllowedIP(
