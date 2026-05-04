@@ -76,8 +76,7 @@ func printVersion() {
 	fmt.Fprintf(os.Stderr, "Licensed under the %s license\n", licenseType)
 }
 
-type MainConfig struct {
-	showVersion     bool
+type RunConfig struct {
 	ipDomainList    string
 	networkList     string
 	port            int
@@ -91,29 +90,59 @@ type MainConfig struct {
 }
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "hash-password":
-			os.Exit(runHashPassword())
-			return
-		case "init":
-			os.Exit(runInit())
-			return
-		}
-	}
-
 	if err := godotenv.Load(".env"); err != nil {
 		if err != os.ErrNotExist {
 			log.Printf("could not read .env: %s", err)
 		}
 	}
 
-	cfg := MainConfig{}
-	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-V", "-version", "--version", "version":
+			printVersion()
+			os.Exit(0)
+		case "help", "-help", "--help":
+			printVersion()
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "USAGE\n")
+			fmt.Fprintf(os.Stderr, "   tlsrouter <subcommand> [options]\n")
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "SUBCOMMANDS\n")
+			fmt.Fprintf(os.Stderr, "   run             Start the TLS router (default if no subcommand)\n")
+			fmt.Fprintf(os.Stderr, "   init            Create config directory and empty config files\n")
+			fmt.Fprintf(os.Stderr, "   hash-password   Hash a password for use in auth config\n")
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "EXAMPLES\n")
+			fmt.Fprintf(os.Stderr, "   tlsrouter init --admin-domain mgmt.example.com\n")
+			fmt.Fprintf(os.Stderr, "   tlsrouter run --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
+			fmt.Fprintf(os.Stderr, "   tlsrouter --port 8443\n")
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "Run 'tlsrouter <subcommand> --help' for subcommand-specific options.\n")
+			os.Exit(0)
+		case "init":
+			os.Exit(runInit())
+		case "run":
+			os.Exit(runServer(os.Args[2:]))
+		case "hash-password":
+			os.Exit(runHashPassword())
+		default:
+			if strings.HasPrefix(os.Args[1], "-") {
+				os.Exit(runServer(os.Args[1:]))
+			}
+			fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", os.Args[1])
+			os.Exit(1)
+		}
+	}
 
-	fs.BoolVar(&cfg.showVersion, "version", false, "Print version and exit")
+	os.Exit(runServer(os.Args[1:]))
+}
+
+func runServer(args []string) int {
+	cfg := RunConfig{}
+	fs := flag.NewFlagSet("tlsrouter run", flag.ContinueOnError)
+
 	fs.StringVar(&cfg.ipDomainList, "ip-domains", cmp.Or(os.Getenv("DYNAMIC_IP_DOMAIN"), "example.localdomain"), "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with these comma-separated base URLs")
-	fs.StringVar(&cfg.networkList, "networks", cmp.Or(os.Getenv("DYNAMIC_HOST_NETWORKS"), "169.254.0.0/16"), "enable dynamic ip url proxying (see --ip-domain) for these networks")
+	fs.StringVar(&cfg.networkList, "networks", cmp.Or(os.Getenv("DYNAMIC_HOST_NETWORKS"), "169.254.0.0/16"), "enable dynamic ip url proxying (see --ip-domains) for these networks")
 	fs.IntVar(&cfg.port, "port", envOrInt("PORT", 443), "TLS port to listen on. -1 to disable.")
 	fs.IntVar(&cfg.plainPort, "plain-port", envOrInt("PLAIN_PORT", 80), "Plain (HTTP) port to listen on (for redirects). -1 to disable.")
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
@@ -127,42 +156,21 @@ func main() {
 		printVersion()
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "USAGE\n")
-		fmt.Fprintf(os.Stderr, "   tlsrouter [options]\n")
-		fmt.Fprintf(os.Stderr, "\n")
-		fmt.Fprintf(os.Stderr, "SUBCOMMANDS\n")
-		fmt.Fprintf(os.Stderr, "   init            Create config directory and empty config files\n")
-		fmt.Fprintf(os.Stderr, "   hash-password   Hash a password for use in auth config\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter run [options]\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "EXAMPLES\n")
-		fmt.Fprintf(os.Stderr, "   tlsrouter init --admin-domain mgmt.example.com\n")
-		fmt.Fprintf(os.Stderr, "   tlsrouter --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter run --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter run --ip-blacklist-repo none\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS\n")
 		fs.PrintDefaults()
 	}
 
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "-V", "-version", "--version", "version":
-			printVersion()
-			return
-		case "help", "-help", "--help":
-			fs.Usage()
-			os.Exit(0)
-			return
-		}
-	}
-
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(0)
+			return 0
 		}
-		os.Exit(1)
-	}
-
-	if cfg.showVersion {
-		printVersion()
-		return
+		return 1
 	}
 
 	if cfg.plainPort >= 0 {
@@ -170,7 +178,7 @@ func main() {
 		go func() {
 			plainAddr := fmt.Sprintf("%s:%d", cfg.bind, cfg.plainPort)
 			if err := tlsrouter.ListenAndRedirectPlainHTTP(plainAddr); err != http.ErrServerClosed {
-				log.Fatalf("HTTP redirect server error: %v", err)
+				log.Printf("WARN: HTTP redirect server error: %v", err)
 			}
 		}()
 		if cfg.port < 0 {
@@ -179,7 +187,7 @@ func main() {
 	}
 	if cfg.port < 0 {
 		log.Printf("closing because neither --port nor --plain-port are positive")
-		return
+		return 0
 	}
 
 	ipDomains := splitList(cfg.ipDomainList)
@@ -188,8 +196,8 @@ func main() {
 	for _, cidr := range splitList(cfg.networkList) {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid network %q: %v\n", cidr, err)
-			os.Exit(1)
+			log.Printf("WARN: invalid network %q: %v (skipping)", cidr, err)
+			continue
 		}
 		networks = append(networks, *ipNet)
 	}
@@ -199,11 +207,13 @@ func main() {
 
 	tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 	if err != nil {
-		log.Fatalf("Vault Error: %q\n%s\n", cfg.vaultPath, err)
+		log.Printf("Vault Error: %q\n%s", cfg.vaultPath, err)
+		return 1
 	}
 	conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 	if err != nil {
-		log.Fatalf("Config Error: %q\n%s\n", cfg.confPath, err)
+		log.Printf("Config Error: %q\n%s", cfg.confPath, err)
+		return 1
 	}
 
 	conf.SetSigChan(sigChan)
@@ -248,14 +258,15 @@ func main() {
 			case syscall.SIGUSR1:
 				log.Println("Received SIGUSR1, reloading config")
 
-				// TODO kill connections to management
 				tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 				if err != nil {
-					log.Fatalf("Vault Error: %q\n%s\n", cfg.vaultPath, err)
+					log.Printf("Vault reload error: %q: %s", cfg.vaultPath, err)
+					continue
 				}
 				conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 				if err != nil {
-					log.Fatalf("Config Error: %q\n%s\n", cfg.confPath, err)
+					log.Printf("Config reload error: %q: %s", cfg.confPath, err)
+					continue
 				}
 				conf.SetSigChan(sigChan)
 				mux := http.NewServeMux()
@@ -263,21 +274,19 @@ func main() {
 				lc2 := tlsrouter.NewListenConfig(conf)
 				_ = Start(&wg, lc2, addr, mux)
 
-				// Gracefully shutdown old server
 				go lc.Shutdown(context.Background())
 
-				// Update server reference
 				lc = lc2
 			case syscall.SIGINT:
 				log.Println("Received SIGINT, shutting down (5s)")
 				lc.Shutdown(context.Background())
 				time.Sleep(5 * time.Second)
-				os.Exit(1)
+				return
 			case syscall.SIGTERM:
 				log.Println("Received SIGTERM, shutting down (5s)")
 				lc.Shutdown(context.Background())
 				time.Sleep(5 * time.Second)
-				os.Exit(1)
+				return
 			default:
 				log.Printf("Received unhandled signal %s", sig)
 			}
@@ -285,6 +294,7 @@ func main() {
 	}()
 
 	wg.Wait()
+	return 0
 }
 
 func defaultConfigDir() string {
