@@ -1,8 +1,12 @@
 package ipgate
 
-import "strings"
+import (
+	"log/slog"
+	"strconv"
+	"strings"
+)
 
-import "strconv"
+func log() *slog.Logger { return slog.Default().WithGroup("ipgate") }
 
 func commaify(n int) string {
 	s := strconv.Itoa(n)

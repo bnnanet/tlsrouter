@@ -5,8 +5,8 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
-	"os"
 	"time"
 
 	"github.com/miekg/dns"
@@ -37,9 +37,9 @@ func New() *Resolver {
 	}
 	if len(r.Servers) == 0 {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: could not read /etc/resolv.conf: %v, using fallback resolvers\n", err)
+			slog.Warn("dnsresolver: could not read /etc/resolv.conf, using fallback resolvers", "err", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "WARN: /etc/resolv.conf has no nameservers, using fallback resolvers\n")
+			slog.Warn("dnsresolver: /etc/resolv.conf has no nameservers, using fallback resolvers")
 		}
 		r.Servers = FallbackServers
 	}

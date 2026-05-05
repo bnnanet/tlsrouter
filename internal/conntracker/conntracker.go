@@ -2,7 +2,7 @@ package conntracker
 
 import (
 	"encoding/csv"
-	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 )
+
+func log() *slog.Logger { return slog.Default().WithGroup("conntracker") }
 
 type record struct {
 	IP       string
@@ -109,12 +111,12 @@ func (ct *Tracker) flush() {
 	_ = os.Remove(ct.path + ".bak")
 	if _, err := os.Stat(ct.path); err == nil {
 		if err := os.Rename(ct.path, ct.path+".bak"); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: conntracker: failed to backup %s: %v\n", ct.path, err)
+			log().Warn("failed to backup", "path", ct.path, "err", err)
 			return
 		}
 	}
 	if err := os.Rename(tmp, ct.path); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: conntracker: failed to rename %s: %v\n", ct.path, err)
+		log().Warn("failed to rename", "path", ct.path, "err", err)
 		return
 	}
 
@@ -136,7 +138,7 @@ func (ct *Tracker) load() {
 
 	rows, err := r.ReadAll()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: conntracker: failed to read %s: %v\n", ct.path, err)
+		log().Warn("failed to read", "path", ct.path, "err", err)
 		return
 	}
 

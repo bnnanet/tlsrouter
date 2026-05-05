@@ -67,13 +67,13 @@ func (ps *PrefixSet) reload(ctx context.Context) error {
 
 	ps.cohort.Store(cohort)
 
-	fmt.Fprintf(os.Stderr, "INFO: ipgate: prefix set loaded %s entries\n", commaify(cohort.Size()))
+	log().Info("prefix set loaded", "entries", commaify(cohort.Size()))
 	return nil
 }
 
 func (ps *PrefixSet) refreshLoop(ctx context.Context) {
 	if err := ps.reload(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: ipgate: prefix set initial load (will retry): %v\n", err)
+		log().Warn("prefix set initial load (will retry)", "err", err)
 	}
 
 	ticker := time.NewTicker(prefixSetRefreshInterval)
@@ -85,7 +85,7 @@ func (ps *PrefixSet) refreshLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := ps.reload(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "WARN: ipgate: prefix set reload: %v\n", err)
+				log().Warn("prefix set reload failed", "err", err)
 			}
 		}
 	}

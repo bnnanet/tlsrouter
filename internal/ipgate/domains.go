@@ -55,8 +55,7 @@ func NewDomainSet(ctx context.Context, csvPath string) (*DomainSet, error) {
 
 	ds.rebuildCohort()
 
-	fmt.Fprintf(os.Stderr, "INFO: ipgate: domain set %s static + %s domains from %s (resolving in background)\n",
-		commaify(len(staticPrefixes)), commaify(len(domains)), csvPath)
+	log().Info("domain set loaded", "static", commaify(len(staticPrefixes)), "domains", commaify(len(domains)), "path", csvPath)
 
 	go ds.refreshLoop(ctx)
 
@@ -100,11 +99,9 @@ func (ds *DomainSet) resolveDomains(ctx context.Context) {
 		if err != nil || len(ips) == 0 {
 			if old, ok := prev[entry.Raw]; ok {
 				next[entry.Raw] = old
-				fmt.Fprintf(os.Stderr, "WARN: ipgate: %s: resolve failed, keeping %d prior IPs: %v\n",
-					entry.Raw, len(old), err)
+				log().Warn("resolve failed, keeping prior IPs", "domain", entry.Raw, "count", len(old), "err", err)
 			} else {
-				fmt.Fprintf(os.Stderr, "WARN: ipgate: %s: resolve failed (no prior data): %v\n",
-					entry.Raw, err)
+				log().Warn("resolve failed, no prior data", "domain", entry.Raw, "err", err)
 			}
 			continue
 		}
@@ -132,7 +129,7 @@ func (ds *DomainSet) rebuildCohort() {
 
 	cohort, err := ipcohort.Parse(all)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: ipgate: domain set rebuild: %v\n", err)
+		log().Warn("domain set rebuild failed", "err", err)
 	}
 	if cohort != nil {
 		ds.cohort.Store(cohort)

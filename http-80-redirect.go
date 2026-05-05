@@ -5,7 +5,6 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -71,7 +70,7 @@ func HandleHTTPSRedirect(w http.ResponseWriter, r *http.Request) {
 	// Reconstruct the target URL: https://<host><path>?query
 	properURL, _, _, redirectBody := EscapeAndRenderURL(r)
 	logURL, _ := url.QueryUnescape(properURL)
-	fmt.Fprintf(os.Stderr, "DEBUG: %s: redirect %s\n", r.Host, logURL)
+	dbg("DEBUG: %s: redirect %s", r.Host, logURL)
 
 	// Determine if client accepts text/html
 	isBrowser := slices.ContainsFunc(

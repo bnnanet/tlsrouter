@@ -603,7 +603,7 @@ func (lc *ListenConfig) RouteCloseClients(w http.ResponseWriter, r *http.Request
 	}
 
 	snialpn := r.PathValue("Service")
-	fmt.Println("SNIALPN Query", snialpn)
+	dbg("DEBUG: SNIALPN Query %s", snialpn)
 	list, selfToClose := lc.closeClients(snialpn, r.RemoteAddr)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -624,7 +624,7 @@ func (lc *ListenConfig) closeClients(snialpn string, remoteAddr string) ([]PConn
 
 	lc.Conns.Range(func(_, v any) bool {
 		wconn := v.(*wrappedConn)
-		fmt.Println("SNIALPN", wconn.SNIALPN.SNI())
+		dbg("DEBUG: SNIALPN %s", wconn.SNIALPN.SNI())
 		if snialpn == wconn.SNIALPN.SNI() || snialpn == string(wconn.SNIALPN) {
 			pconn := WConnToPConn(wconn)
 			if pconn.Address == remoteAddr {

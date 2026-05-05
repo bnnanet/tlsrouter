@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,12 +20,12 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEn
 	for i, app := range conf.Apps {
 		for i, srv := range app.Services {
 			if len(srv.Backends) == 0 {
-				fmt.Println("debug: warn: service has no backends")
+				slog.Warn("service has no backends")
 				continue
 			}
 
 			if len(srv.Domains) == 0 {
-				fmt.Println("debug: warn: service has no domains")
+				slog.Warn("service has no domains")
 				continue
 			}
 
@@ -92,7 +92,7 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEn
 			var err error
 			dnsConf.APIToken, err = conf.TabVault.ToVaultURI(dnsConf.APIToken)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warn: DNS provider token could not be written to vault: %v\n", err)
+				slog.Warn("DNS provider token could not be written to vault", "err", err)
 				continue
 			}
 
@@ -107,7 +107,7 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEn
 
 func LintConfig(conf *Config, allowedAlpns []string) error {
 	if len(conf.AdminDNS.Domains) == 0 {
-		fmt.Fprintf(os.Stderr, "warn: no '_admin' domain configured — admin API disabled\n")
+		slog.Warn("no admin domain configured, admin API disabled")
 	}
 
 	for _, domain := range conf.AdminDNS.Domains {
@@ -172,7 +172,7 @@ func LintConfig(conf *Config, allowedAlpns []string) error {
 			}
 
 			if len(srv.Backends) == 0 {
-				fmt.Fprintf(os.Stderr, "warn: domains+alpns set %q have no 'backends' defined\n", snialpns)
+				slog.Warn("domains+alpns set has no backends defined", "set", snialpns)
 			}
 
 			for i, b := range srv.Backends {

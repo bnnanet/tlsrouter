@@ -8,7 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -78,6 +78,7 @@ func printVersion() {
 
 type MainConfig struct {
 	showVersion     bool
+	verbose         bool
 	ipDomainList    string
 	networkList     string
 	port            int
@@ -96,9 +97,18 @@ func main() {
 		return
 	}
 
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	})))
+
 	if err := godotenv.Load(".env"); err != nil {
 		if err != os.ErrNotExist {
-			log.Printf("could not read .env: %s", err)
+			slog.Warn("could not read .env", "err", err)
 		}
 	}
 
@@ -106,6 +116,7 @@ func main() {
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
 	fs.BoolVar(&cfg.showVersion, "version", false, "Print version and exit")
+	fs.BoolVar(&cfg.verbose, "verbose", false, "Enable debug trace output")
 	fs.StringVar(&cfg.ipDomainList, "ip-domains", cmp.Or(os.Getenv("DYNAMIC_IP_DOMAIN"), "example.localdomain"), "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with these comma-separated base URLs")
 	fs.StringVar(&cfg.networkList, "networks", cmp.Or(os.Getenv("DYNAMIC_HOST_NETWORKS"), "169.254.0.0/16"), "enable dynamic ip url proxying (see --ip-domain) for these networks")
 	fs.IntVar(&cfg.port, "port", envOrInt("PORT", 443), "TLS port to listen on. -1 to disable.")
@@ -154,12 +165,15 @@ func main() {
 		return
 	}
 
+	tlsrouter.Verbose = cfg.verbose
+
 	if cfg.plainPort >= 0 {
-		log.Printf("HTTP redirect listener starting on :%d → HTTPS (HTML meta)", cfg.plainPort)
+		slog.Info("HTTP redirect listener starting", "port", cfg.plainPort)
 		go func() {
 			plainAddr := fmt.Sprintf("%s:%d", cfg.bind, cfg.plainPort)
 			if err := tlsrouter.ListenAndRedirectPlainHTTP(plainAddr); err != http.ErrServerClosed {
-				log.Fatalf("HTTP redirect server error: %v", err)
+				slog.Error("HTTP redirect server failed", "err", err)
+				os.Exit(1)
 			}
 		}()
 		if cfg.port < 0 {
@@ -167,7 +181,7 @@ func main() {
 		}
 	}
 	if cfg.port < 0 {
-		log.Printf("closing because neither --port nor --plain-port are positive")
+		slog.Info("closing because neither --port nor --plain-port are positive")
 		return
 	}
 
@@ -177,14 +191,14 @@ func main() {
 	for _, cidr := range splitList(cfg.networkList) {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid network %q: %v\n", cidr, err)
+			slog.Error("invalid network", "cidr", cidr, "err", err)
 			os.Exit(1)
 		}
 		networks = append(networks, *ipNet)
 	}
 
 	if len(ipDomains) > 0 && len(networks) == 0 {
-		fmt.Fprintf(os.Stderr, "error: --ip-domains requires --networks to define valid target CIDRs\n")
+		slog.Error("--ip-domains requires --networks to define valid target CIDRs")
 		os.Exit(1)
 	}
 
@@ -193,11 +207,13 @@ func main() {
 
 	tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 	if err != nil {
-		log.Fatalf("Vault Error: %q\n%s\n", cfg.vaultPath, err)
+		slog.Error("vault open failed", "path", cfg.vaultPath, "err", err)
+		os.Exit(1)
 	}
 	conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 	if err != nil {
-		log.Fatalf("Config Error: %q\n%s\n", cfg.confPath, err)
+		slog.Error("config load failed", "path", cfg.confPath, "err", err)
+		os.Exit(1)
 	}
 
 	conf.SetSigChan(sigChan)
@@ -210,10 +226,10 @@ func main() {
 		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
-				log.Printf("WARN: ip-whitelist: %v — blacklist disabled (no anti-lockout whitelist)", err)
+				slog.Warn("ip-whitelist load failed, blacklist disabled", "err", err)
 				cfg.ipBlacklistRepo = "none"
 			} else {
-				log.Printf("WARN: ip-whitelist: %v (skipping)", err)
+				slog.Warn("ip-whitelist load failed", "err", err)
 			}
 		} else if allowList != nil {
 			lc.AllowList = allowList
@@ -225,7 +241,7 @@ func main() {
 			"tables/inbound/networks.txt",
 		})
 		if err != nil {
-			log.Printf("WARN: ip-blacklist: %v (skipping)", err)
+			slog.Warn("ip-blacklist load failed", "err", err)
 		} else {
 			lc.Blocklist = blocklist
 		}
@@ -240,17 +256,17 @@ func main() {
 			sig := <-sigChan
 			switch sig {
 			case syscall.SIGUSR1:
-				log.Println("Received SIGUSR1, reloading config")
+				slog.Info("reloading config", "signal", "SIGUSR1")
 
 				// TODO kill connections to management
 				tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 				if err != nil {
-					log.Printf("WARN: reload: vault %q: %v (keeping current config)", cfg.vaultPath, err)
+					slog.Warn("reload failed, keeping current config", "component", "vault", "path", cfg.vaultPath, "err", err)
 					continue
 				}
 				conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 				if err != nil {
-					log.Printf("WARN: reload: config %q: %v (keeping current config)", cfg.confPath, err)
+					slog.Warn("reload failed, keeping current config", "component", "config", "path", cfg.confPath, "err", err)
 					continue
 				}
 				conf.SetSigChan(sigChan)
@@ -265,17 +281,17 @@ func main() {
 				// Update server reference
 				lc = lc2
 			case syscall.SIGINT:
-				log.Println("Received SIGINT, shutting down (5s)")
+				slog.Info("shutting down", "signal", "SIGINT", "grace", "5s")
 				lc.Shutdown(context.Background())
 				time.Sleep(5 * time.Second)
 				os.Exit(1)
 			case syscall.SIGTERM:
-				log.Println("Received SIGTERM, shutting down (5s)")
+				slog.Info("shutting down", "signal", "SIGTERM", "grace", "5s")
 				lc.Shutdown(context.Background())
 				time.Sleep(5 * time.Second)
 				os.Exit(1)
 			default:
-				log.Printf("Received unhandled signal %s", sig)
+				slog.Warn("unhandled signal", "signal", sig)
 			}
 		}
 	}()
@@ -299,7 +315,7 @@ func envOrInt(key string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
-		fmt.Fprintf(os.Stderr, "warn: invalid %s=%q, using default %d\n", key, v, fallback)
+		slog.Warn("invalid env value, using default", "key", key, "value", v, "default", fallback)
 		return fallback
 	}
 	return n
@@ -320,11 +336,11 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *htt
 	go func() {
 		defer wg.Done()
 
-		log.Printf("\nListening on %s...", addr)
+		slog.Info("listening", "addr", addr)
 		if err := lc.ListenAndProxy(addr, mux); err != nil && !errors.Is(err, net.ErrClosed) {
-			log.Printf("Server error: %v", err)
+			slog.Error("server error", "err", err)
 		}
-		log.Printf("Closed\n")
+		slog.Info("server closed")
 	}()
 	return nil
 }
@@ -337,7 +353,7 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string
 			if len(ipDomains) == 0 {
 				return tlsrouter.Config{}, fmt.Errorf("config %q not found and no --ip-domains configured — nothing to route", filePath)
 			}
-			log.Printf("WARN: config %q not found — starting with empty config (ip-domains only)", filePath)
+			slog.Warn("config not found, starting with empty config (ip-domains only)", "path", filePath)
 			conf := &tlsrouter.Config{}
 			conf.FilePath = filePath
 			conf.TabVault = tabVault
@@ -365,7 +381,7 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string
 
 		ips, err := net.LookupIP(domain)
 		if err != nil {
-			log.Printf("WARN: ip-domain %q: DNS lookup failed: %v (skipping)", domain, err)
+			slog.Warn("ip-domain DNS lookup failed", "domain", domain, "err", err)
 			continue
 		}
 		for _, ip := range ips {
@@ -381,7 +397,7 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "INFO resolved ip domain IPs: %#v\n", conf.IPs)
+		slog.Info("ip-domains resolved", "ips", conf.IPs)
 	}
 
 	customAlpns := []string{"ssh"}

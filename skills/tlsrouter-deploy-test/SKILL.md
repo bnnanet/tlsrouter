@@ -94,7 +94,19 @@ VERIFY: script prints all `OK` — reachable gets 200, unreachable logs show
 `backend unreachable ... skipping ACME`, outside-network logs show
 `target IP not in any allowed network`
 
-## 6. Test connection tracker
+## 6. Test passthrough (no TLS termination)
+
+```sh
+./skills/tlsrouter-deploy-test/scripts/test-passthrough.sh PASSTHROUGH_DOMAIN [RESOLVE_HOST]
+```
+
+Where:
+- PASSTHROUGH_DOMAIN: a domain configured with `terminate_tls=false` (e.g. pbs1.m.bnna.net)
+- RESOLVE_HOST: optional, force DNS resolution to this host (e.g. tls2.slc1.bnna.net)
+
+VERIFY: script prints `OK` for both plain and explicit ALPN connections (200 response, no TLS alert error)
+
+## 7. Test connection tracker
 
 ```sh
 ./skills/tlsrouter-deploy-test/scripts/test-conntracker.sh TARGET_HOST TARGET_DOMAIN

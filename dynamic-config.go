@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -101,6 +100,9 @@ type dnsRoute struct {
 }
 
 func dbg(tmpl string, args ...any) {
+	if !Verbose {
+		return
+	}
 	debugMux.Lock()
 	fmt.Printf(tmpl+"\n", args...)
 	debugMux.Unlock()
@@ -217,7 +219,7 @@ func getAllowedIP(
 	alpns []string,
 ) (*dnsRoute, error) {
 	if len(conf.Networks) == 0 {
-		fmt.Fprintf(os.Stderr, "DEBUG: %s: global config has no dynamic direct ip networks\n", domain)
+		dbg("DEBUG: %s: global config has no dynamic direct ip networks", domain)
 		return nil, errTryNext
 	}
 
