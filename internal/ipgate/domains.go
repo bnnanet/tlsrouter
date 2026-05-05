@@ -5,13 +5,13 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"net"
 	"net/netip"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/bnnanet/tlsrouter/dnsresolver"
 	"github.com/therootcompany/golib/net/ipcohort"
 )
 
@@ -93,13 +93,11 @@ func (ds *DomainSet) resolveDomains(ctx context.Context) {
 	prev := *ds.resolved.Load()
 	next := make(map[string][]string, len(ds.domains))
 
-	resolver := &net.Resolver{}
+	resolver := dnsresolver.New()
 	for _, entry := range ds.domains {
-		resolveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		addrs, err := resolver.LookupHost(resolveCtx, entry.Raw)
-		cancel()
+		ips, _, err := resolver.LookupIP(ctx, entry.Raw)
 
-		if err != nil || len(addrs) == 0 {
+		if err != nil || len(ips) == 0 {
 			if old, ok := prev[entry.Raw]; ok {
 				next[entry.Raw] = old
 				fmt.Fprintf(os.Stderr, "WARN: ipgate: %s: resolve failed, keeping %d prior IPs: %v\n",
@@ -111,6 +109,10 @@ func (ds *DomainSet) resolveDomains(ctx context.Context) {
 			continue
 		}
 
+		addrs := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			addrs = append(addrs, ip.String())
+		}
 		next[entry.Raw] = addrs
 	}
 
