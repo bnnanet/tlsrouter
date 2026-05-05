@@ -183,6 +183,11 @@ func main() {
 		networks = append(networks, *ipNet)
 	}
 
+	if len(ipDomains) > 0 && len(networks) == 0 {
+		fmt.Fprintf(os.Stderr, "error: --ip-domains requires --networks to define valid target CIDRs\n")
+		os.Exit(1)
+	}
+
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
 
@@ -205,9 +210,11 @@ func main() {
 		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
-				log.Fatalf("blacklist requires a whitelist for anti-lockout: %v", err)
+				log.Printf("WARN: ip-whitelist: %v — blacklist disabled (no anti-lockout whitelist)", err)
+				cfg.ipBlacklistRepo = "none"
+			} else {
+				log.Printf("WARN: ip-whitelist: %v (skipping)", err)
 			}
-			log.Printf("WARN: ip-whitelist: %v (skipping)", err)
 		} else if allowList != nil {
 			lc.AllowList = allowList
 		}
@@ -218,9 +225,10 @@ func main() {
 			"tables/inbound/networks.txt",
 		})
 		if err != nil {
-			log.Fatalf("ip-blacklist: %v", err)
+			log.Printf("WARN: ip-blacklist: %v (skipping)", err)
+		} else {
+			lc.Blocklist = blocklist
 		}
-		lc.Blocklist = blocklist
 	}
 
 	var wg sync.WaitGroup
@@ -237,11 +245,13 @@ func main() {
 				// TODO kill connections to management
 				tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 				if err != nil {
-					log.Fatalf("Vault Error: %q\n%s\n", cfg.vaultPath, err)
+					log.Printf("WARN: reload: vault %q: %v (keeping current config)", cfg.vaultPath, err)
+					continue
 				}
 				conf, err := ReadConfig(cfg.confPath, tabVault, ipDomains, networks)
 				if err != nil {
-					log.Fatalf("Config Error: %q\n%s\n", cfg.confPath, err)
+					log.Printf("WARN: reload: config %q: %v (keeping current config)", cfg.confPath, err)
+					continue
 				}
 				conf.SetSigChan(sigChan)
 				mux := http.NewServeMux()
@@ -323,16 +333,26 @@ func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *htt
 func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string, networks []net.IPNet) (tlsrouter.Config, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if len(ipDomains) == 0 {
+				return tlsrouter.Config{}, fmt.Errorf("config %q not found and no --ip-domains configured — nothing to route", filePath)
+			}
+			log.Printf("WARN: config %q not found — starting with empty config (ip-domains only)", filePath)
+			conf := &tlsrouter.Config{}
+			conf.FilePath = filePath
+			conf.TabVault = tabVault
+			conf.Networks = networks
+			conf.IPDomains = ipDomains
+			return *conf, nil
+		}
 		return tlsrouter.Config{}, err
 	}
 	defer func() { _ = file.Close() }()
 
 	reader := csv.NewReader(file)
-	//reader.Comma = '\t'
 	conf, err := tlsrouter.ReadCSVToConfig(reader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading CSV: %v\n", err)
-		os.Exit(1)
+		return tlsrouter.Config{}, fmt.Errorf("reading CSV %q: %w", filePath, err)
 	}
 	conf.FilePath = filePath
 	conf.TabVault = tabVault
@@ -345,7 +365,8 @@ func ReadConfig(filePath string, tabVault *tabvault.TabVault, ipDomains []string
 
 		ips, err := net.LookupIP(domain)
 		if err != nil {
-			return tlsrouter.Config{}, err
+			log.Printf("WARN: ip-domain %q: DNS lookup failed: %v (skipping)", domain, err)
+			continue
 		}
 		for _, ip := range ips {
 			var found bool

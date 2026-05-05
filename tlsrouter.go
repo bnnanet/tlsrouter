@@ -393,12 +393,11 @@ func NewListenConfig(conf Config) *ListenConfig {
 	} else {
 		newDNSTokenURI, err := conf.TabVault.ToVaultURI(conf.AdminDNS.APIToken)
 		if err != nil {
-			panic(errors.New("admin DNS API Token could not be written to TabVault"))
-		}
-		if newDNSTokenURI != conf.AdminDNS.APIToken {
+			fmt.Fprintf(os.Stderr, "warn: admin DNS API token could not be written to vault: %v\n", err)
+		} else if newDNSTokenURI != conf.AdminDNS.APIToken {
 			conf.AdminDNS.APIToken = newDNSTokenURI
 			if err := conf.Save(); err != nil {
-				panic(err)
+				fmt.Fprintf(os.Stderr, "warn: could not save config after vault update: %v\n", err)
 			}
 		}
 
@@ -412,12 +411,11 @@ func NewListenConfig(conf Config) *ListenConfig {
 		len(conf.AdminDNS.AdminToken) > 0 {
 		newAdminTokenURI, err := conf.TabVault.ToVaultURI(conf.AdminDNS.AdminToken)
 		if err != nil {
-			panic(errors.New("admin Internal API Token could not be written to TabVault"))
-		}
-		if newAdminTokenURI != conf.AdminDNS.AdminToken {
+			fmt.Fprintf(os.Stderr, "warn: admin internal API token could not be written to vault: %v\n", err)
+		} else if newAdminTokenURI != conf.AdminDNS.AdminToken {
 			conf.AdminDNS.AdminToken = newAdminTokenURI
 			if err := conf.Save(); err != nil {
-				panic(err)
+				fmt.Fprintf(os.Stderr, "warn: could not save config after vault update: %v\n", err)
 			}
 		}
 	}
@@ -518,7 +516,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 				},
 			}
 		default:
-			panic(fmt.Errorf("API %q is not implemented yet", dnsConf.API))
+			fmt.Fprintf(os.Stderr, "warn: DNS API %q is not implemented, skipping domain %q\n", dnsConf.API, domain)
 		}
 	}
 

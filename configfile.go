@@ -92,7 +92,8 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEn
 			var err error
 			dnsConf.APIToken, err = conf.TabVault.ToVaultURI(dnsConf.APIToken)
 			if err != nil {
-				panic("TabVault could not be written to")
+				fmt.Fprintf(os.Stderr, "warn: DNS provider token could not be written to vault: %v\n", err)
+				continue
 			}
 
 			app.DNSProviders[i] = dnsConf
@@ -106,7 +107,7 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEn
 
 func LintConfig(conf *Config, allowedAlpns []string) error {
 	if len(conf.AdminDNS.Domains) == 0 {
-		return fmt.Errorf("error: 'admin.domains' is empty")
+		fmt.Fprintf(os.Stderr, "warn: no '_admin' domain configured — admin API disabled\n")
 	}
 
 	for _, domain := range conf.AdminDNS.Domains {
@@ -133,7 +134,7 @@ func LintConfig(conf *Config, allowedAlpns []string) error {
 			break
 		}
 	}
-	if !hasActiveService {
+	if !hasActiveService && len(conf.IPDomains) == 0 {
 		// TODO once we can edit the config via API, this is not a problem
 		return fmt.Errorf("error: no 'apps' with active (non-disabled) 'services'")
 	}
