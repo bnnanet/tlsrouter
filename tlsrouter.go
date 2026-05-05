@@ -1176,7 +1176,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 		terminate = false
 	} else if backend == nil {
-		if snialpn.SNI() == acmez.ACMETLS1Protocol {
+		if snialpn.ALPN() == acmez.ACMETLS1Protocol {
 			dbg("DEBUG: %s: %#v ended TLS session without backend (possibly solving ACME TLS-ALPN)", snialpn, conn.RemoteAddr())
 			return
 		}
