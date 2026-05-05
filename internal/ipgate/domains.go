@@ -151,6 +151,7 @@ func parseDomainSetCSV(path string) (staticPrefixes []string, domains []domainEn
 		r.Comma = '\t'
 	}
 
+	firstRow := true
 	for {
 		record, readErr := r.Read()
 		if readErr == io.EOF {
@@ -164,6 +165,17 @@ func parseDomainSetCSV(path string) (staticPrefixes []string, domains []domainEn
 		}
 
 		raw := strings.TrimSpace(record[0])
+
+		if firstRow {
+			firstRow = false
+			if _, err := netip.ParseAddr(raw); err != nil {
+				if _, err := netip.ParsePrefix(raw); err != nil {
+					if !strings.Contains(raw, ".") {
+						continue
+					}
+				}
+			}
+		}
 		if raw == "" {
 			continue
 		}
