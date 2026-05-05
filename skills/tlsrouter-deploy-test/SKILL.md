@@ -117,6 +117,6 @@ VERIFY: script prints all `OK` — connections.tsv exists, has header, contains 
 ## Notes
 
 - Port 8443 or other non-standard ports may be firewalled. Test on the production port (443) with controlled blocklist data.
-- The blocklist loads asynchronously (~2-15s depending on data size). Wait for `INFO: ipgate: prefix set loaded N entries` in logs before testing.
+- The blocklist loads asynchronously (~2-15s depending on data size). Wait for `level=INFO msg="prefix set loaded" ipgate.entries=N` in logs before testing.
 - Git-managed blocklist directories get overwritten on fetch. Use a local `file://` repo for controlled testing.
 - NEVER: Leave test blocklist config in production. Always restore and verify.

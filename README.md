@@ -6,10 +6,8 @@ Supports both static and dynamic TLS routing.
 
 ```sh
 tlsrouter \
-   --config ~/.config/tlsrouter/backends.csv \
-   --vault ~/.config/tlsrouter/secrets.tsv \
    --ip-domains vm.example.com \
-   --networks 192.168.1.0/24 \
+   --networks 10.0.0.0/8 \
    --bind 0.0.0.0 \
    --port 443
 ```
@@ -17,13 +15,17 @@ tlsrouter \
 Configured backends are loaded statically, while URLs like <https://tls-192-168-1-100.vm.example.com> are dynamically proxied -
 provided that the ip domain and ip-as-subdomain addresses match the allowed domain and networks.
 
-- `--config` — Path to backends config CSV file (default: `~/.config/tlsrouter/backends.csv`)
-- `--vault` — Path to vault TSV file (default: `~/.config/tlsrouter/secrets.tsv`)
 - `--ip-domains` — Comma-separated base domains for dynamic IP URLs (default: `example.localdomain`)
 - `--networks` — Allowed networks for dynamic IP proxying (default: `169.254.0.0/16`)
 - `--bind` — Address to bind to (default: `0.0.0.0`)
 - `--port` — TLS port to listen on; `-1` to disable (default: `443`)
 - `--plain-port` — Plain HTTP port for redirects; `-1` to disable (default: `80`)
+- `--config` — Path to backends config CSV file (default: `~/.config/tlsrouter/backends.csv`)
+- `--vault` — Path to vault TSV file (default: `~/.config/tlsrouter/secrets.tsv`)
+- `--ip-whitelist` — Path to IP whitelist CSV (IPs/CIDRs/domains that bypass the blacklist)
+- `--ip-blacklist-repo` — Git repo URL for IP blacklist, or `none` to disable
+- `--ip-blacklist-dir` — Path to IP blacklist data directory
+- `--verbose` — Enable debug trace output
 
 ## Environment Variables
 
@@ -31,13 +33,13 @@ All flags can be set via environment variables (flags take precedence):
 
 | Flag | Env Var | Default |
 | :--- | :------ | :------ |
+| `--ip-domains` | `DYNAMIC_IP_DOMAIN` | `example.localdomain` |
+| `--networks` | `DYNAMIC_HOST_NETWORKS` | `169.254.0.0/16` |
 | `--port` | `PORT` | `443` |
 | `--plain-port` | `PLAIN_PORT` | `80` |
 | `--bind` | `BIND` | `0.0.0.0` |
 | `--config` | `CONFIG_FILE` | `~/.config/tlsrouter/backends.csv` |
 | `--vault` | `VAULT_FILE` | `~/.config/tlsrouter/secrets.tsv` |
-| `--ip-domains` | `DYNAMIC_IP_DOMAIN` | `example.localdomain` |
-| `--networks` | `DYNAMIC_HOST_NETWORKS` | `169.254.0.0/16` |
 
 A `.env` file in the working directory is loaded automatically.
 
@@ -95,7 +97,7 @@ Note: ports must be selected according to the table below. Arbitrary ports are n
 
 ## Dynamic IP URL Mapping
 
-The URL pattern is There are two URL patterns:
+There are two URL patterns:
 - `<layer4>-<ipv4-octets>-<ip-domain>`
 - tls-192-168-1-100.example.com (Handles / Terminates TLS)
 - tcp-192-168-1-100.example.com (Raw TCP Passthrough / Non-Terminating)
