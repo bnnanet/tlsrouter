@@ -1606,9 +1606,12 @@ func (wconn *wrappedConn) Write(b []byte) (int, error) {
 		return n, err
 	}
 
-	fmt.Fprintf(os.Stderr, "Handshake: %x\n", b)
+	// This error is intentional: crypto/tls calls Write to send a TLS alert
+	// when GetConfigForClient returns an error (e.g. ErrDoNotTerminate for
+	// passthrough). The error return prevents the alert from reaching the
+	// client, which would kill the connection before the tunnel is established.
 	wconn.once.Do(wconn.wg.Done)
-	return 0, fmt.Errorf("sanity fail: wrappedConn does not support Write")
+	return 0, fmt.Errorf("wrappedConn: Write called before Passthru")
 }
 
 func (wconn *wrappedConn) Close() error {
