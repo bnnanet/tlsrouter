@@ -65,6 +65,43 @@ func (e ErrorNoTLSConfig) Error() string {
 	return string(e)
 }
 
+// certmagicConfigMap is a thread-safe map from domain name to *certmagic.Config.
+// Entries are written once during initialization; reads may occur concurrently
+// from certmagic background goroutines before initialization completes.
+type certmagicConfigMap struct {
+	mu sync.RWMutex
+	m  map[string]*certmagic.Config
+}
+
+func newCertmagicConfigMap() *certmagicConfigMap {
+	return &certmagicConfigMap{m: make(map[string]*certmagic.Config)}
+}
+
+// Get returns the certmagic.Config for domain, or nil if not set.
+func (c *certmagicConfigMap) Get(domain string) *certmagic.Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.m[domain]
+}
+
+// SetNew stores magic for domain only if the domain is not already present.
+// Returns true if stored, false if domain was already set.
+func (c *certmagicConfigMap) SetNew(domain string, magic *certmagic.Config) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.m[domain]; ok {
+		return false
+	}
+	c.m[domain] = magic
+	return true
+}
+
+// resolvedService is the result of a new-domain resolution stored by resolveGroup.
+type resolvedService struct {
+	snialpn SNIALPN
+	svc     *ConfigService
+}
+
 // Config holds the TLS routing configuration and hostname resolutions.
 // Note: JSON keys are encoded in a consistent order, as per struct-order,
 // and generic map keys are sorted.
@@ -288,7 +325,7 @@ type ListenConfig struct {
 	ACMEDirectoryEndpoint string
 	issuerConfMap         map[string]*ACMEDNS
 	certmagicTLSALPNOnly  *certmagic.Config
-	certmagicConfMap      map[string]*certmagic.Config
+	certmagicConfMap      *certmagicConfigMap
 	certmagicCache        *certmagic.Cache
 	certmagicStorage      certmagic.Storage
 	done                  chan context.Context
@@ -327,13 +364,13 @@ func NewListenConfig(conf Config) *ListenConfig {
 	}
 	certmagicCache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(cert certmagic.Certificate) (*certmagic.Config, error) {
-			magic, exists := lc.certmagicConfMap[cert.Names[0]] // len(Names) >= 0 is guaranteed
-			if !exists {
+			magic := lc.certmagicConfMap.Get(cert.Names[0]) // len(Names) >= 0 is guaranteed
+			if magic == nil {
 				lc.serviceMu.RLock()
-				_, exists = lc.slowCertmagicConfMap[cert.Names[0]]
+				_, ok := lc.slowCertmagicConfMap[cert.Names[0]]
 				lc.serviceMu.RUnlock()
 
-				if !exists {
+				if !ok {
 					return nil, fmt.Errorf("impossible error: pre-configured domain %q is no longer configured", strings.Join(cert.Names, ", "))
 				}
 				magic = lc.certmagicTLSALPNOnly
@@ -367,7 +404,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		ACMEDirectoryEndpoint: directoryEndpoint,
 		issuerConfMap:         make(map[string]*ACMEDNS),
 		certmagicTLSALPNOnly:  nil,
-		certmagicConfMap:      make(map[string]*certmagic.Config),
+		certmagicConfMap:      newCertmagicConfigMap(),
 		slowCertmagicConfMap:  make(map[string]struct{}),
 		serviceMu:             sync.RWMutex{},
 		certmagicStorage:      certmagicStorage,
@@ -515,25 +552,25 @@ func NewListenConfig(conf Config) *ListenConfig {
 	}
 
 	registerACMEDomain := func(domain string) error {
-		if _, exists := lc.certmagicConfMap[domain]; exists {
-			return nil
-		}
-
 		// note: to stop managing a certificate:
 		// lc.certmagicCache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: domain}})
 
+		var magic *certmagic.Config
 		if acmeConf, hasDNSConf := lc.issuerConfMap[domain]; hasDNSConf {
 			dbg("DEBUG: %s: TLS will terminate as per DNS config", domain)
 			// note: would be better to have certmagic per-provider, maybe
-			magic := lc.newCertmagic(acmeConf.DNSProvider)
-			lc.certmagicConfMap[domain] = magic
-			// note: certmagic's domain array creates a config for each - it doesn't support multi-SAN
-			return magic.ManageSync(lc.Context, []string{domain})
+			magic = lc.newCertmagic(acmeConf.DNSProvider)
+		} else {
+			dbg("DEBUG: %s: TLS will terminate with TLS-ALPN", domain)
+			magic = lc.certmagicTLSALPNOnly
 		}
 
-		dbg("DEBUG: %s: TLS will terminate with TLS-ALPN", domain)
-		lc.certmagicConfMap[domain] = lc.certmagicTLSALPNOnly
-		return lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain})
+		// SetNew is a no-op if domain was already registered; ManageSync is skipped too.
+		// note: certmagic's domain array creates a config for each - it doesn't support multi-SAN
+		if !lc.certmagicConfMap.SetNew(domain, magic) {
+			return nil
+		}
+		return magic.ManageSync(lc.Context, []string{domain})
 	}
 
 	for _, domain := range conf.AdminDNS.Domains {
@@ -1020,7 +1057,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			if alpns[0] == acmez.ACMETLS1Protocol {
 				dbg("DEBUG: %s: handling acme ALPN challenge", domain)
 				// note: certmagicConfMap only holds backends that terminate
-				magic := lc.certmagicConfMap[domain]
+				magic := lc.certmagicConfMap.Get(domain)
 				if magic == nil {
 					lc.serviceMu.RLock()
 					_, ok := lc.slowCertmagicConfMap[domain]
@@ -1092,12 +1129,13 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 						HTTPTunnel:   lc.adminTunnel,
 					}
 					_ = wconn.Passthru()
-					if lc.certmagicConfMap[domain] == nil {
+					adminMagic := lc.certmagicConfMap.Get(domain)
+					if adminMagic == nil {
 						return nil, fmt.Errorf("SANITY FAIL: %s: missing ACME config", snialpn)
 					}
 					dbg("DEBUG: %s: returning tls.Config with admin certmagic m.GetCertificate", snialpn)
 					return &tls.Config{
-						GetCertificate: lc.certmagicConfMap[domain].GetCertificate,
+						GetCertificate: adminMagic.GetCertificate,
 						NextProtos:     []string{clientALPN},
 					}, nil
 				}
@@ -1137,7 +1175,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 				return nil, ErrDoNotTerminate
 			}
 
-			magic := lc.certmagicConfMap[domain]
+			magic := lc.certmagicConfMap.Get(domain)
 			if magic == nil {
 				lc.serviceMu.RLock()
 				if _, ok := lc.slowCertmagicConfMap[domain]; ok {
@@ -1460,24 +1498,32 @@ func (lc *ListenConfig) matchService(conf *Config, domain string, alpns []string
 		subDomain = subDomain[1:]
 	}
 
-	route, err := lc.resolveRoute(lc.Context, conf, domain, alpns)
-	if err != nil {
-		if err != errTryNext {
-			return "", nil, err
+	// Deduplicate concurrent first-connection resolutions for the same domain.
+	// Without singleflight, simultaneous connections to an uncached domain would
+	// each call cacheService (and ManageSync) independently.
+	resultAny, resolveErr, _ := lc.resolveGroup.Do(domain, func() (any, error) {
+		route, err := lc.resolveRoute(lc.Context, conf, domain, alpns)
+		if err != nil {
+			return nil, err
 		}
-	} else {
 		snialpn, srvConf := lc.buildService(conf, domain, route)
 		if err := lc.cacheService(snialpn, domain, srvConf, route, alpns); err != nil {
-			return "", nil, err
+			return nil, err
 		}
-		return snialpn, srvConf, nil
+		return &resolvedService{snialpn: snialpn, svc: srvConf}, nil
+	})
+	if resolveErr != nil {
+		if resolveErr == errTryNext {
+			return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
+				"no tls config matched for domain %q to backend for any of %q",
+				domain,
+				strings.Join(alpns, ", "),
+			))
+		}
+		return "", nil, resolveErr
 	}
-
-	return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
-		"no tls config matched for domain %q to backend for any of %q",
-		domain,
-		strings.Join(alpns, ", "),
-	))
+	rs := resultAny.(*resolvedService)
+	return rs.snialpn, rs.svc, nil
 }
 
 func (lc *ListenConfig) refreshCacheEntry(entry *dnsCacheEntry, conf *Config, domain string, alpns []string, snialpn SNIALPN) (*ConfigService, bool) {
