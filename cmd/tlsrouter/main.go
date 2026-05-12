@@ -71,7 +71,7 @@ func init() {
 
 // printVersion displays the version, commit, and build date.
 func printVersion() {
-	fmt.Fprintf(os.Stderr, "%s v%s %s (%s)\n", name, version, commit[:7], date)
+	fmt.Fprintf(os.Stderr, "%s v%s %s (%s)\n", name, strings.TrimPrefix(version, "v"), commit[:7], date)
 	fmt.Fprintf(os.Stderr, "Copyright (C) %s %s\n", licenseYear, licenseOwner)
 	fmt.Fprintf(os.Stderr, "Licensed under the %s license\n", licenseType)
 }
