@@ -77,18 +77,20 @@ func printVersion() {
 }
 
 type MainConfig struct {
-	showVersion     bool
-	verbose         bool
-	ipDomainList    string
-	networkList     string
-	port            int
-	plainPort       int
-	bind            string
-	confPath        string
-	vaultPath       string
-	ipWhitelistPath string
-	ipBlacklistDir  string
-	ipBlacklistRepo string
+	showVersion        bool
+	verbose            bool
+	ipDomainList       string
+	networkList        string
+	port               int
+	plainPort          int
+	bind               string
+	confPath           string
+	vaultPath          string
+	ipWhitelistPath    string
+	ipBlacklistDir     string
+	ipBlacklistRepo    string
+	wildcardRateLimit  int
+	wildcardRateWindow time.Duration
 }
 
 func main() {
@@ -127,6 +129,8 @@ func main() {
 	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "Path to IP whitelist CSV file (IPs/CIDRs that bypass the blacklist)")
 	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
 	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
+	fs.IntVar(&cfg.wildcardRateLimit, "wildcard-rate-limit", envOrInt("WILDCARD_RATE_LIMIT", 10), "Max ACME issuances per detected wildcard parent zone within --wildcard-rate-window. 0 disables the cap.")
+	fs.DurationVar(&cfg.wildcardRateWindow, "wildcard-rate-window", envOrDuration("WILDCARD_RATE_WINDOW", 24*time.Hour), "Sliding window for --wildcard-rate-limit (e.g. 24h, 168h)")
 
 	fs.Usage = func() {
 		printVersion()
@@ -215,6 +219,8 @@ func main() {
 		slog.Error("config load failed", "path", cfg.confPath, "err", err)
 		os.Exit(1)
 	}
+	conf.WildcardRateLimit = cfg.wildcardRateLimit
+	conf.WildcardRateWindow = cfg.wildcardRateWindow
 
 	conf.SetSigChan(sigChan)
 
@@ -269,6 +275,8 @@ func main() {
 					slog.Warn("reload failed, keeping current config", "component", "config", "path", cfg.confPath, "err", err)
 					continue
 				}
+				conf.WildcardRateLimit = cfg.wildcardRateLimit
+				conf.WildcardRateWindow = cfg.wildcardRateWindow
 				conf.SetSigChan(sigChan)
 				mux := http.NewServeMux()
 				setupRouter(conf, mux)
@@ -306,6 +314,19 @@ func defaultConfigDir() string {
 		configHome = filepath.Join(home, ".config")
 	}
 	return filepath.Join(configHome, "tlsrouter")
+}
+
+func envOrDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("invalid env duration, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return d
 }
 
 func envOrInt(key string, fallback int) int {
