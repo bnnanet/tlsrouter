@@ -4,6 +4,7 @@ package dnsresolver
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,6 +15,14 @@ import (
 
 const QueryTimeout = 750 * time.Millisecond
 
+// DefaultMaxCNAMEHops bounds CNAME-chain following in LookupCNAME.
+// Most recursive resolvers cap chain following around 8–16; production
+// chains rarely exceed 2–3, so 5 leaves a comfortable margin and keeps
+// pathological setups from amplifying lookup cost.
+const DefaultMaxCNAMEHops = 5
+
+var ErrNoARecord = errors.New("did not resolve to A record")
+
 var FallbackServers = []string{
 	"208.67.222.123:53", // OpenDNS
 	"1.1.1.3:53",        // Cloudflare
@@ -21,8 +30,9 @@ var FallbackServers = []string{
 }
 
 type Resolver struct {
-	Servers []string
-	Timeout time.Duration
+	Servers      []string
+	Timeout      time.Duration
+	MaxCNAMEHops int
 }
 
 func New() *Resolver {
@@ -47,9 +57,13 @@ func New() *Resolver {
 	return r
 }
 
+// LookupCNAME returns the terminal canonical name reached by following the full
+// CNAME chain for domain, plus the minimum TTL across the chain. It issues a
+// TypeA query so the recursive resolver returns every CNAME hop in the Answer
+// section (recursives generally do not chase chains for explicit TypeCNAME).
 func (r *Resolver) LookupCNAME(ctx context.Context, domain string) (string, uint32, error) {
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(domain), dns.TypeCNAME)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	m.RecursionDesired = true
 
 	resp, ttl, err := r.Exchange(ctx, m)
@@ -57,15 +71,14 @@ func (r *Resolver) LookupCNAME(ctx context.Context, domain string) (string, uint
 		return "", 0, err
 	}
 
-	for _, rr := range resp.Answer {
-		if cname, ok := rr.(*dns.CNAME); ok {
-			if ttl == 0 {
-				ttl = rr.Header().Ttl
-			}
-			return cname.Target, ttl, nil
-		}
+	maxHops := cmp.Or(r.MaxCNAMEHops, DefaultMaxCNAMEHops)
+	if len(resp.Answer) > maxHops {
+		return "", 0, fmt.Errorf("%s: did not resolve to A record within %d hops: %w", domain, maxHops, ErrNoARecord)
 	}
-	return "", 0, fmt.Errorf("no CNAME record for %s", domain)
+	if _, ok := resp.Answer[len(resp.Answer)-1].(*dns.A); !ok {
+		return "", 0, fmt.Errorf("%s: did not resolve to A record within %d hops: %w", domain, maxHops, ErrNoARecord)
+	}
+	return resp.Answer[len(resp.Answer)-1].Header().Name, ttl, nil
 }
 
 func (r *Resolver) LookupSRV(ctx context.Context, service, proto, domain string) ([]*dns.SRV, uint32, error) {
