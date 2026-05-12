@@ -31,8 +31,10 @@ func NewPrefixSet(ctx context.Context, repoURL, dataPath string, files []string)
 		return nil, fmt.Errorf("ipgate: create data dir: %w", err)
 	}
 
+	repo := gitshallow.New(repoURL, dataPath, 0, "")
+
 	ps := &PrefixSet{
-		repo:  gitshallow.New(repoURL, dataPath, 1, ""),
+		repo:  repo,
 		files: files,
 	}
 	ps.cohort.Store(&ipcohort.Cohort{})
