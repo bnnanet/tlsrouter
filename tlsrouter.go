@@ -1017,6 +1017,10 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 
 			slog.Info("connect", "src", hello.Conn.RemoteAddr(), "domain", domain, "alpn", strings.Join(alpns, ","))
 
+			if domain == "" {
+				return nil, fmt.Errorf("no SNI")
+			}
+
 			if alpns[0] == acmez.ACMETLS1Protocol {
 				dbg("DEBUG: %s: handling acme ALPN challenge", domain)
 				// note: certmagicConfMap only holds backends that terminate
