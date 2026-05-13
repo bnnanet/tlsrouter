@@ -72,7 +72,7 @@ func (r *Resolver) LookupCNAME(ctx context.Context, domain string) (string, uint
 	}
 
 	maxHops := cmp.Or(r.MaxCNAMEHops, DefaultMaxCNAMEHops)
-	if len(resp.Answer) > maxHops {
+	if len(resp.Answer) == 0 || len(resp.Answer) > maxHops {
 		return "", 0, fmt.Errorf("%s: did not resolve to A record within %d hops: %w", domain, maxHops, ErrNoARecord)
 	}
 	if _, ok := resp.Answer[len(resp.Answer)-1].(*dns.A); !ok {
