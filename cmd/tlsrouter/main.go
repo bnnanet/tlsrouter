@@ -223,7 +223,20 @@ func main() {
 	lc := tlsrouter.NewListenConfig(conf)
 
 	if cfg.ipWhitelistPath != "" {
-		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
+		staticPrefixes, domains, err := func() ([]string, []string, error) {
+			f, err := os.Open(cfg.ipWhitelistPath)
+			if err != nil {
+				return nil, nil, err
+			}
+			defer func() { _ = f.Close() }()
+			cr := csv.NewReader(f)
+			cr.FieldsPerRecord = -1
+			cr.Comment = '#'
+			if strings.HasSuffix(cfg.ipWhitelistPath, ".tsv") {
+				cr.Comma = '\t'
+			}
+			return ipgate.ParseDomainSet(cr)
+		}()
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
 				slog.Warn("ip-whitelist load failed, blacklist disabled", "err", err)
@@ -231,8 +244,8 @@ func main() {
 			} else {
 				slog.Warn("ip-whitelist load failed", "err", err)
 			}
-		} else if allowList != nil {
-			lc.AllowList = allowList
+		} else {
+			lc.AllowList = ipgate.NewDomainSet(lc.Context, staticPrefixes, domains)
 		}
 	}
 	if cfg.ipBlacklistRepo != "none" {

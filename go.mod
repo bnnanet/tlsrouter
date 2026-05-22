@@ -11,7 +11,7 @@ require (
 	github.com/mholt/acmez/v3 v3.1.4
 	github.com/pires/go-proxyproto v0.9.0
 	github.com/therootcompany/golib/net/dnsresolver v0.5.0
-	github.com/therootcompany/golib/net/ipgate v0.5.0
+	github.com/therootcompany/golib/net/ipgate v0.5.2
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.40.0
 )
