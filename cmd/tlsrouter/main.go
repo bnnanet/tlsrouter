@@ -23,7 +23,7 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
-	"github.com/bnnanet/tlsrouter/internal/ipgate"
+	"github.com/therootcompany/golib/net/ipgate"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
 	"github.com/joho/godotenv"

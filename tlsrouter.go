@@ -32,9 +32,9 @@ import (
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/sys/unix"
 
-	"github.com/bnnanet/tlsrouter/dnsresolver"
+	"github.com/therootcompany/golib/net/dnsresolver"
 	"github.com/bnnanet/tlsrouter/internal/conntracker"
-	"github.com/bnnanet/tlsrouter/internal/ipgate"
+	"github.com/therootcompany/golib/net/ipgate"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
 

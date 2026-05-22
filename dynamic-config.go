@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bnnanet/tlsrouter/dnsresolver"
+	"github.com/therootcompany/golib/net/dnsresolver"
 )
 
 var errTryNext = fmt.Errorf("no worries, carry on")
