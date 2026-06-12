@@ -21,19 +21,23 @@ Uses commit date when worktree is clean, current time when dirty. Verify with:
 Deploy to a host:
 
 ```sh
-ssh vms.example.com "sudo systemctl stop tlsrouter"
-scp ./agents/tmp/tlsrouter vms.example.com:~/bin/tlsrouter
-ssh vms.example.com "sudo systemctl start tlsrouter"
+./skills/tlsrouter-deploy-test/scripts/build-and-deploy.sh app@vms.example.com
 ```
 
-- MUST: Stop the service before scp — binary is running, overwrite fails otherwise
-- Verify: `ssh vms.example.com "sudo systemctl is-active tlsrouter"` → `active`
+The script scps as `tlsrouter.new`, then `mv` + `chmod` — no need to stop the service first.
+Restart with serviceman (NEVER use sudo):
+
+```sh
+ssh app@vms.example.com "~/.local/bin/serviceman restart --name tlsrouter"
+```
 
 Install with serviceman (first time):
 
 ```sh
 serviceman add --name tlsrouter -- ~/bin/tlsrouter daemon
 ```
+
+Check `memory/reference_deploy_targets.md` for host-specific users and service managers (systemd vs OpenRC).
 
 ## Directory Layout
 
@@ -46,7 +50,11 @@ serviceman add --name tlsrouter -- ~/bin/tlsrouter daemon
 | `tlsrouter.go` | Core proxy logic, PlainConn, wrappedConn |
 | `api.go` | Admin API handlers, connection reporting |
 | `configfile.go` | CSV config parser |
-| `dynamic-config.go` | CNAME/SRV-based dynamic routing |
+| `dynamic-config.go` | CNAME/SRV-based dynamic routing, dbg() verbose output |
+| `http-80-redirect.go` | Plain HTTP → HTTPS redirect listener |
+| `dnsresolver/` | DNS resolver with TTL tracking |
+| `internal/ipgate/` | IP allowlist (domain-based) and blocklist (git-managed prefix sets) |
+| `internal/conntracker/` | Connection tracker — domain-to-IP mapping, persisted as TSV |
 
 Server paths:
 
@@ -58,17 +66,18 @@ Server paths:
 
 ## Static Config (backends.csv)
 
-Headers: `app_slug,domain,alpn,backend_address,backend_port,terminate_tls,connect_tls,skip_tls_verify,auth,allowed_client_hostnames`
+Headers: `app_slug,domain,alpn,backend_address,backend_port,terminate_tls,connect_tls,rewrite_host,skip_tls_verify,auth,allowed_client_hostnames`
 
 ```csv
-_admin,vms.example.com,admin,vault://5d7d83f3...,,,,,
-myapp,site.example.com,ssh,127.0.0.1,22,false,false,false,
-myapp,site.example.com,http/1.1,172.16.0.1,443,true,true,true,vault://a1b2c3...,
+_admin,vms.example.com,admin,vault://5d7d83f3...,,,,,,
+myapp,site.example.com,ssh,127.0.0.1,22,false,false,,false,
+myapp,site.example.com,http/1.1,172.16.0.1,443,true,true,backend.example.com,true,vault://a1b2c3...,
 ```
 
 - `_admin` app_slug with `alpn=admin` → admin API backend (still HTTP on the wire; `admin` is a config shim, not a real ALPN)
 - `terminate_tls=true` → tlsrouter terminates TLS
 - `connect_tls=true` → re-encrypts to backend
+- `rewrite_host` → overrides Host header sent to backend (fixes DNS rebinding and auth domain mismatch with connect_tls)
 - `auth` → vault entry reference, MUST fail closed if missing
 - Multiple rows per domain for different ALPNs (ssh, http/1.1)
 
@@ -101,7 +110,7 @@ SRV     _http._tcp.example.com   10 3080 tls-10-11-2-21.vms.example.com  300
 SRV      _ssh._tcp.example.com   10   22 tls-10-11-2-21.vms.example.com  300
 ```
 
-CLI flags: `--ip-domains` (which domains are IP-pattern domains), `--networks` (allowed CIDRs)
+CLI flags: `--ip-domains` (which domains are IP-pattern domains), `--networks` (allowed CIDRs, typically 10.x ranges)
 
 ## Key Architecture
 
@@ -133,9 +142,18 @@ curl --http1.1 https://app.example.com/
 # Auth-gated (expect 401)
 curl https://app.example.com/
 
-# Logs
-ssh vms.example.com "sudo journalctl -u tlsrouter --no-pager -n 20"
+# Passthrough (non-terminated TLS)
+./skills/tlsrouter-deploy-test/scripts/test-passthrough.sh passthru.example.com
+
+# Logs (uses slog structured output)
+ssh app@vms.example.com "journalctl --user -u tlsrouter --no-pager -n 20"
 ```
+
+## Logging
+
+Uses `log/slog` with `TextHandler` to stderr. Timestamps suppressed (journald provides them).
+Internal packages use `slog.WithGroup` for namespaced keys: `ipgate.*`, `conntracker.*`.
+Debug output gated behind `--verbose` flag via `dbg()` function in `dynamic-config.go`.
 
 ## Port Table (key entries)
 
