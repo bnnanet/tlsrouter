@@ -35,6 +35,7 @@ import (
 	"github.com/bnnanet/tlsrouter/dnsresolver"
 	"github.com/bnnanet/tlsrouter/internal/conntracker"
 	"github.com/bnnanet/tlsrouter/internal/ipgate"
+	"github.com/bnnanet/tlsrouter/internal/wildcardlimit"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
@@ -83,6 +84,12 @@ type Config struct {
 	Networks              []net.IPNet        `json:"dynamic_host_networks"`
 	IPDomains             []string           `json:"dynamic_ip_domains"`
 	IPs                   []net.IP           `json:"-"`
+	// WildcardRateLimit caps ACME issuances per wildcard parent zone within
+	// WildcardRateWindow. The cap applies only to names served by an
+	// upstream wildcard CNAME into one of IPDomains, detected at issuance
+	// time via DNS probe. Zero disables the cap.
+	WildcardRateLimit  int           `json:"-"`
+	WildcardRateWindow time.Duration `json:"-"`
 }
 
 // ShortSHA2 is not safe for use after atomic Store()
@@ -180,6 +187,11 @@ type ConfigService struct {
 	Backends               []Backend      `json:"backends"`
 	CurrentBackend         *atomic.Uint32 `json:"-"`
 	AllowedClientHostnames []string       `json:"allowed_client_hostnames,omitempty"`
+	// AskURL gates ACME issuance for wildcard domains: tlsrouter does
+	// GET <AskURL>?domain=<sni> and only requests a certificate if the
+	// response is HTTP 200. Empty AskURL on a wildcard service refuses
+	// issuance (fail-closed).
+	AskURL string `json:"ask_url,omitempty"`
 }
 
 func (srv *ConfigService) GenSlug() string {
@@ -304,6 +316,8 @@ type ListenConfig struct {
 	serviceMu             sync.RWMutex
 	resolveGroup          singleflight.Group
 	connTracker           *conntracker.Tracker
+	wildcardLimiter       *wildcardlimit.Limiter
+	ipDomains             []string
 }
 
 // TODO move to *Listener
@@ -312,6 +326,9 @@ func (lc *ListenConfig) Shutdown(ctx context.Context) {
 	// TODO create a context with a 5 second timeout and
 	_ = lc.adminServer.Shutdown(ctx)
 	lc.connTracker.Shutdown()
+	if lc.wildcardLimiter != nil {
+		lc.wildcardLimiter.Shutdown()
+	}
 	lc.done <- ctx
 }
 
@@ -361,6 +378,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 		Blocklist:             ipgate.EmptyPrefixSet(),
 		AllowList:             ipgate.EmptyDomainSet(),
 		connTracker:           conntracker.New(dataDir()),
+		wildcardLimiter:       wildcardlimit.New(dataDir(), conf.WildcardRateLimit, conf.WildcardRateWindow),
+		ipDomains:             conf.IPDomains,
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
 		Close:                 cancel,
@@ -799,7 +818,7 @@ func (lc *ListenConfig) newCertmagicTLSALPNOnly() *certmagic.Config {
 	magic := certmagic.New(lc.certmagicCache, certmagic.Config{
 		RenewalWindowRatio: 0.3,
 		OnDemand: &certmagic.OnDemandConfig{
-			DecisionFunc: nil, // use ManageSync() allowlist
+			DecisionFunc: lc.decideIssuance,
 		},
 		OnEvent: func(ctx context.Context, eventName string, data map[string]any) error {
 			if eventName != "cert_obtaining" {
@@ -836,7 +855,7 @@ func (lc *ListenConfig) newCertmagic(dnsProvider certmagic.DNSProvider) *certmag
 	magic := certmagic.New(lc.certmagicCache, certmagic.Config{
 		RenewalWindowRatio: 0.3,
 		OnDemand: &certmagic.OnDemandConfig{
-			DecisionFunc: nil, // use ManageSync() allowlist
+			DecisionFunc: lc.decideIssuance,
 		},
 		OnEvent: func(ctx context.Context, eventName string, data map[string]any) error {
 			if eventName != "cert_obtaining" {

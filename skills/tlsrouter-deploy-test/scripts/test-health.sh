@@ -34,6 +34,10 @@ echo ""
 check "HTTPS reachable" "200" "https://${g_domain}/version"
 check "HTTP redirect" "301" "http://${g_domain}/"
 
+if test "$g_domain" = "vms.oneal.im"; then
+	check "CNAME chain (2-hop)" "200" "https://testchaining.oneal.im/version"
+fi
+
 echo ""
 echo "Results: $g_pass passed, $g_fail failed"
 

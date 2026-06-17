@@ -183,6 +183,17 @@ func LintConfig(conf *Config, allowedAlpns []string) error {
 					return fmt.Errorf("target %d in set %q has empty 'port'", i, snialpns)
 				}
 			}
+
+			hasWildcard := false
+			for _, domain := range srv.Domains {
+				if strings.HasPrefix(domain, "*.") {
+					hasWildcard = true
+					break
+				}
+			}
+			if srv.AskURL != "" && !hasWildcard {
+				slog.Warn("ask_url is only consulted for wildcard services; ignored on non-wildcard service", "service", srv.Slug, "domains", strings.Join(srv.Domains, ","))
+			}
 		}
 	}
 
@@ -201,6 +212,7 @@ var expectedHeaders = []string{
 	"skip_tls_verify",
 	"auth",
 	"allowed_client_hostnames",
+	"ask_url",
 }
 
 func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
@@ -286,6 +298,10 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 		if i, ok := headerIndices["allowed_client_hostnames"]; ok && i < len(record) && record[i] != "" {
 			allowedClientHostnames = strings.Split(record[i], ",")
 		}
+		askURL := ""
+		if i, ok := headerIndices["ask_url"]; ok && i < len(record) {
+			askURL = record[i]
+		}
 
 		// handle the special case of the admin app
 		if appSlug == "_admin" && len(domain) > 0 {
@@ -365,6 +381,7 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 				ALPNs:                  []string{alpn},
 				Backends:               []Backend{},
 				AllowedClientHostnames: allowedClientHostnames,
+				AskURL:                 askURL,
 			}
 			serviceMap[serviceSlug] = service
 			// app.Services = append(app.Services, *service)
@@ -381,6 +398,11 @@ func ReadCSVToConfig(r *csv.Reader) (*Config, error) {
 				if !slices.Contains(service.AllowedClientHostnames, hostname) && hostname != "" {
 					service.AllowedClientHostnames = append(service.AllowedClientHostnames, hostname)
 				}
+			}
+			if service.AskURL == "" && askURL != "" {
+				service.AskURL = askURL
+			} else if askURL != "" && service.AskURL != askURL {
+				slog.Warn("conflicting ask_url for service, keeping first", "service", service.Slug, "existing", service.AskURL, "ignored", askURL)
 			}
 		}
 
@@ -443,6 +465,7 @@ type CSVRecord struct {
 	SkipTLSVerify          bool
 	Auth                   string
 	AllowedClientHostnames string
+	AskURL                 string
 }
 
 // ToCSV converts the config to a CSV string, using ToRecords and RecordsToCSV.
@@ -476,6 +499,7 @@ func (c *Config) ToRecords() ([]CSVRecord, error) {
 							SkipTLSVerify:          backend.SkipTLSVerify,
 							Auth:                   backend.AuthToken,
 							AllowedClientHostnames: strings.Join(service.AllowedClientHostnames, ";"),
+							AskURL:                 service.AskURL,
 						})
 					}
 				}
@@ -548,6 +572,7 @@ func RecordsToCSV(csvw *csv.Writer, records []CSVRecord) error {
 			fmt.Sprintf("%t", record.SkipTLSVerify),
 			record.Auth,
 			record.AllowedClientHostnames,
+			record.AskURL,
 		}
 		if err := csvw.Write(csvRow); err != nil {
 			return fmt.Errorf("failed to write CSV record: %w", err)
