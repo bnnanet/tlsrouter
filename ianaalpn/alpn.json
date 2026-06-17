@@ -185,7 +185,7 @@
     "protocol": "CoAP (over DTLS)",
     "name": "co",
     "bytes": "636f",
-    "reference": "[draft-lenders-core-coap-dtls-svcb-00]"
+    "reference": "[RFC7252][RFC9952]"
   },
   {
     "protocol": "XMPP jabber:client namespace",
@@ -300,5 +300,17 @@
     "name": "radius/1.1",
     "bytes": "7261646975732f312e31",
     "reference": "[RFC9765]"
+  },
+  {
+    "protocol": "NetPerfMeter Protocol Control Channel (NPMP-CONTROL)",
+    "name": "netperfmeter/control\n",
+    "bytes": "6e6574706572666d657465722f636f6e74726f6c0a",
+    "reference": "[https://www.nntb.no/~dreibh/netperfmeter/]"
+  },
+  {
+    "protocol": "NetPerfMeter Protocol Data Channel (NPMP-DATA)",
+    "name": "netperfmeter/data\n",
+    "bytes": "6e6574706572666d657465722f646174610a",
+    "reference": "[https://www.nntb.no/~dreibh/netperfmeter/]"
   }
 ]
