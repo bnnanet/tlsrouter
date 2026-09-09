@@ -181,7 +181,7 @@ func (lc *ListenConfig) cacheService(snialpn SNIALPN, domain string, service *Co
 		if err := checkBackendReachable(route.IP.String(), route.Port); err != nil {
 			return fmt.Errorf("%w for %s: %w", errBackendUnreachable, domain, err)
 		}
-		if err := lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain}); err != nil {
+		if err := lc.manageTLSALPNOnly(domain); err != nil {
 			return err
 		}
 	}

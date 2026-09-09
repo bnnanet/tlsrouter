@@ -325,6 +325,7 @@ type ListenConfig struct {
 	ACMEDirectoryEndpoint string
 	issuerConfMap         map[string]*ACMEDNS
 	certmagicTLSALPNOnly  *certmagic.Config
+	certmagicTLSALPNMu    sync.Mutex
 	certmagicConfMap      *certmagicConfigMap
 	certmagicCache        *certmagic.Cache
 	certmagicStorage      certmagic.Storage
@@ -566,6 +567,9 @@ func NewListenConfig(conf Config) *ListenConfig {
 		// note: certmagic's domain array creates a config for each - it doesn't support multi-SAN
 		if !lc.certmagicConfMap.SetNew(domain, magic) {
 			return nil
+		}
+		if magic == lc.certmagicTLSALPNOnly {
+			return lc.manageTLSALPNOnly(domain)
 		}
 		return magic.ManageSync(lc.Context, []string{domain})
 	}
@@ -826,6 +830,18 @@ func (lc *ListenConfig) StoreConfig(conf Config) {
 
 func (lc *ListenConfig) LoadConfig() Config {
 	return lc.config.Load().(Config)
+}
+
+func (lc *ListenConfig) withTLSALPNManage(fn func() error) error {
+	lc.certmagicTLSALPNMu.Lock()
+	defer lc.certmagicTLSALPNMu.Unlock()
+	return fn()
+}
+
+func (lc *ListenConfig) manageTLSALPNOnly(domain string) error {
+	return lc.withTLSALPNManage(func() error {
+		return lc.certmagicTLSALPNOnly.ManageSync(lc.Context, []string{domain})
+	})
 }
 
 func (lc *ListenConfig) newCertmagicTLSALPNOnly() *certmagic.Config {
