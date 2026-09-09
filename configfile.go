@@ -56,6 +56,11 @@ func NormalizeConfig(conf *Config) (map[string][]string, map[SNIALPN]*dnsCacheEn
 				// *.example.com => .example.com
 				domain = strings.TrimPrefix(domain, "*")
 
+				// Skip blocked domains
+				if conf.blockedDomains != nil && conf.blockedDomains.Contains(domain) {
+					continue
+				}
+
 				alpns := domainALPNMatchers[domain]
 				for _, alpn := range srv.ALPNs {
 					if !slices.Contains(alpns, alpn) {
