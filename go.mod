@@ -13,7 +13,7 @@ require (
 	github.com/pires/go-proxyproto v0.9.0
 	github.com/therootcompany/golib/net/gitshallow v0.9.3
 	github.com/therootcompany/golib/net/ipcohort v0.9.0
-	github.com/therootcompany/golib/net/ipgate v0.5.2
+	github.com/therootcompany/golib/net/ipgate v0.5.3
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 )
