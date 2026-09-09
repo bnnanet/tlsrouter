@@ -56,12 +56,6 @@ func (e *dnsCacheEntry) extend(staleAt, expiresAt time.Time) {
 }
 
 func clampTTL(ttl uint32) time.Duration {
-	d := time.Duration(ttl) * time.Second
-	if d < minTTL {
-		d = minTTL
-	}
-	if d > maxTTL {
-		d = maxTTL
-	}
+	d := min(max(time.Duration(ttl)*time.Second, minTTL), maxTTL)
 	return d
 }
