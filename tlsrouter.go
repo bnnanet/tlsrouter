@@ -1172,10 +1172,21 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			dbg("DEBUG: %s: GetConfigForClient: return tls.Config with cached certmagic m.GetCertificate", snialpn)
 			_ = wconn.Passthru()
 
+			alpn := snialpn.ALPN()
+			// "http" is a config shorthand — resolve to the first HTTP-family ALPN
+			// the client actually offered (h2, http/1.1, etc.)
+			if alpn == "http" {
+				for _, offered := range hello.SupportedProtos {
+					if slices.Contains(HTTPFamilyALPNs, offered) {
+						alpn = offered
+						break
+					}
+				}
+			}
 			return &tls.Config{
 				// Certificates: []tls.Certificate{*tlsCert},
 				GetCertificate: magic.GetCertificate,
-				NextProtos:     []string{snialpn.ALPN()},
+				NextProtos:     []string{alpn},
 			}, nil
 		},
 	})
