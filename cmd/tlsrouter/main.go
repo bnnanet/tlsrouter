@@ -27,9 +27,62 @@ import (
 	"github.com/bnnanet/tlsrouter/tabvault"
 
 	"github.com/joho/godotenv"
+	extipgate "github.com/therootcompany/golib/net/ipgate"
+	"github.com/therootcompany/golib/net/iplist"
 )
 
 const defaultBlocklistRepo = "https://github.com/bitwire-it/ipblocklist.git"
+
+func defaultIPListCachePath() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	return filepath.Join(cacheDir, "tlsrouter", "ip-sources")
+}
+
+func newDomainSet(ctx context.Context, entries []string) *extipgate.DomainSet {
+	staticPrefixes := make([]string, 0, len(entries))
+	domains := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if _, _, err := net.ParseCIDR(entry); err == nil || net.ParseIP(entry) != nil {
+			staticPrefixes = append(staticPrefixes, entry)
+		} else {
+			domains = append(domains, entry)
+		}
+	}
+	return extipgate.NewDomainSet(ctx, staticPrefixes, domains)
+}
+
+func materializeIPList(ctx context.Context, source, cacheDir, name string) (string, error) {
+	entries, err := iplist.Load(ctx, source, cacheDir)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(cacheDir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".iplist-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	for _, entry := range entries {
+		if _, err := fmt.Fprintln(tmp, entry); err != nil {
+			_ = tmp.Close()
+			return "", err
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 
 func defaultBlocklistPath() string {
 	dataHome := os.Getenv("XDG_DATA_HOME")
@@ -84,12 +137,12 @@ type MainConfig struct {
 	port               int
 	plainPort          int
 	bind               string
-	confPath            string
-	vaultPath           string
-	ipWhitelistPath     string
-	ipBlacklistDir      string
-	ipBlacklistRepo     string
-	ipBlacklistOverlay  string
+	confPath           string
+	vaultPath          string
+	ipWhitelistPath    string
+	ipBlacklistDir     string
+	ipBlacklistRepo    string
+	ipBlacklistOverlay string
 }
 
 func main() {
@@ -125,10 +178,10 @@ func main() {
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
 	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), filepath.Join(defaultConfigDir(), "backends.csv")), "Path to backends config CSV file")
 	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), filepath.Join(defaultConfigDir(), "secrets.tsv")), "Path to vault TSV file")
-	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "Path to IP whitelist CSV file (IPs/CIDRs that bypass the blacklist)")
+	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "TSV/CSV file or URL of IP whitelist entries (IPs, CIDRs, domains, or nested list URLs)")
 	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
 	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
-	fs.StringVar(&cfg.ipBlacklistOverlay, "ip-blacklist-overlay", "", "Path to overlay file for IP blacklist (appended to git repo entries)")
+	fs.StringVar(&cfg.ipBlacklistOverlay, "ip-blacklist-overlay", "", "TSV/CSV file or URL of extra IP blacklist entries (appended to Git entries)")
 
 	fs.Usage = func() {
 		printVersion()
@@ -225,7 +278,7 @@ func main() {
 	lc := tlsrouter.NewListenConfig(conf)
 
 	if cfg.ipWhitelistPath != "" {
-		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
+		entries, err := iplist.Load(lc.Context, cfg.ipWhitelistPath, defaultIPListCachePath())
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
 				slog.Warn("ip-whitelist load failed, blacklist disabled", "err", err)
@@ -233,14 +286,19 @@ func main() {
 			} else {
 				slog.Warn("ip-whitelist load failed", "err", err)
 			}
-		} else if allowList != nil {
-			lc.AllowList = allowList
+		} else {
+			lc.AllowList = newDomainSet(lc.Context, entries)
 		}
 	}
 	if cfg.ipBlacklistRepo != "none" {
 		var overlayFiles []string
 		if cfg.ipBlacklistOverlay != "" {
-			overlayFiles = []string{cfg.ipBlacklistOverlay}
+			overlayPath, err := materializeIPList(lc.Context, cfg.ipBlacklistOverlay, defaultIPListCachePath(), "blacklist-overlay.tsv")
+			if err != nil {
+				slog.Warn("ip-blacklist overlay load failed", "err", err)
+			} else {
+				overlayFiles = []string{overlayPath}
+			}
 		}
 		blocklist, err := ipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, overlayFiles, []string{
 			"tables/inbound/single_ips.txt",
@@ -338,16 +396,14 @@ func splitList(s string) []string {
 }
 
 func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *http.ServeMux) error {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 
 		slog.Info("listening", "addr", addr)
 		if err := lc.ListenAndProxy(addr, mux); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Error("server error", "err", err)
 		}
 		slog.Info("server closed")
-	}()
+	})
 	return nil
 }
 

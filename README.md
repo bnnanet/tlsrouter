@@ -41,6 +41,19 @@ All flags can be set via environment variables (flags take precedence):
 
 A `.env` file in the working directory is loaded automatically.
 
+## IP policy lists
+
+`--ip-whitelist` and `--ip-blacklist-overlay` accept a local TSV/CSV file or an HTTP(S) URL. Each row uses its first column. Entries may be IPs, CIDRs, domains, or another HTTP(S) TSV/CSV URL. URL credentials use Basic Auth from URL userinfo and URL responses are cached persistently under the user cache directory.
+
+```text
+network\tnote
+127.0.0.1\tlocal
+infra.example.com\tinternal
+https://user:pass@example.com/lists/extra.tsv
+```
+
+The whitelist takes precedence over the blacklist. URL lists use conditional HTTP caching and keep the last good copy when refresh fails.
+
 ## DNS Authorization
 
 Sites are configured through DNS.

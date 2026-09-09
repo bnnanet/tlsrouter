@@ -42,6 +42,7 @@ import (
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
 	proxyproto "github.com/pires/go-proxyproto"
+	extipgate "github.com/therootcompany/golib/net/ipgate"
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
@@ -298,7 +299,7 @@ type ListenConfig struct {
 	netLn                 net.Listener
 	dns                   *dnsresolver.Resolver
 	Blocklist             *ipgate.PrefixSet
-	AllowList             *ipgate.DomainSet
+	AllowList             *extipgate.DomainSet
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
@@ -359,7 +360,7 @@ func NewListenConfig(conf Config) *ListenConfig {
 		serviceBySNIALPN:      snialpnMatchers,
 		dns:                   dnsresolver.New(),
 		Blocklist:             ipgate.EmptyPrefixSet(),
-		AllowList:             ipgate.EmptyDomainSet(),
+		AllowList:             extipgate.EmptyDomainSet(),
 		connTracker:           conntracker.New(dataDir()),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
@@ -1116,7 +1117,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			backends := mcfg.Backends
 			n := uint32(len(backends))
 			start := mcfg.CurrentBackend.Add(1) - 1 // atomic increment, get previous value
-			for attempt := uint32(0); attempt < n; attempt++ {
+			for attempt := range n {
 				idx := (start + attempt) % n
 				b := backends[idx]
 
