@@ -23,8 +23,9 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
-	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/tabvault"
+	"github.com/therootcompany/golib/net/iplist"
+	"github.com/therootcompany/golib/net/ippolicy"
 
 	"github.com/joho/godotenv"
 )
@@ -77,18 +78,19 @@ func printVersion() {
 }
 
 type MainConfig struct {
-	showVersion     bool
-	verbose         bool
-	ipDomainList    string
-	networkList     string
-	port            int
-	plainPort       int
-	bind            string
-	confPath        string
-	vaultPath       string
-	ipWhitelistPath string
-	ipBlacklistDir  string
-	ipBlacklistRepo string
+	showVersion      bool
+	verbose          bool
+	ipDomainList     string
+	networkList      string
+	port             int
+	plainPort        int
+	bind             string
+	confPath         string
+	vaultPath        string
+	ipWhitelistPath  string
+	ipBlacklistDir   string
+	ipBlacklistRepo  string
+	ipBlacklistExtra string
 }
 
 func main() {
@@ -124,9 +126,10 @@ func main() {
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
 	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), filepath.Join(defaultConfigDir(), "backends.csv")), "Path to backends config CSV file")
 	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), filepath.Join(defaultConfigDir(), "secrets.tsv")), "Path to vault TSV file")
-	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "Path to IP whitelist CSV file (IPs/CIDRs that bypass the blacklist)")
+	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "IP whitelist TSV/CSV file or HTTP(S) URL (IPs/CIDRs/domains)")
 	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
 	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
+	fs.StringVar(&cfg.ipBlacklistExtra, "ip-blacklist-extra", "", "IP blacklist TSV/CSV file or HTTP(S) URL (IPs/CIDRs/domains)")
 
 	fs.Usage = func() {
 		printVersion()
@@ -222,30 +225,48 @@ func main() {
 	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
 
+	var whitelist *iplist.Source
 	if cfg.ipWhitelistPath != "" {
-		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
-		if err != nil {
-			if cfg.ipBlacklistRepo != "none" {
-				slog.Warn("ip-whitelist load failed, blacklist disabled", "err", err)
-				cfg.ipBlacklistRepo = "none"
-			} else {
-				slog.Warn("ip-whitelist load failed", "err", err)
-			}
-		} else if allowList != nil {
-			lc.AllowList = allowList
-		}
-	}
-	if cfg.ipBlacklistRepo != "none" {
-		blocklist, err := ipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
-			"tables/inbound/single_ips.txt",
-			"tables/inbound/networks.txt",
+		whitelist, err = iplist.NewSource(lc.Context, iplist.SourceConfig{
+			Source:   cfg.ipWhitelistPath,
+			CacheDir: defaultIPListCacheDir(),
 		})
 		if err != nil {
-			slog.Warn("ip-blacklist load failed", "err", err)
-		} else {
-			lc.Blocklist = blocklist
+			slog.Warn("ip-whitelist load failed, blacklist disabled", "err", err)
+			whitelist = nil
 		}
 	}
+
+	var extra *iplist.Source
+	var gitBlacklist *ippolicy.PrefixSet
+	if whitelist != nil {
+		if cfg.ipBlacklistExtra != "" {
+			extra, err = iplist.NewSource(lc.Context, iplist.SourceConfig{
+				Source:   cfg.ipBlacklistExtra,
+				CacheDir: defaultIPListCacheDir(),
+				Optional: true,
+			})
+			if err != nil {
+				slog.Warn("ip-blacklist-extra load failed", "err", err)
+				extra = nil
+			}
+		}
+		if cfg.ipBlacklistRepo != "none" {
+			gitBlacklist, err = ippolicy.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
+				"tables/inbound/single_ips.txt",
+				"tables/inbound/networks.txt",
+			}, 0)
+			if err != nil {
+				slog.Warn("ip-blacklist load failed", "err", err)
+				gitBlacklist = nil
+			}
+		}
+	}
+	lc.IPPolicy = ippolicy.New(lc.Context, ippolicy.Config{
+		Whitelist:      whitelist,
+		Blacklist:      gitBlacklist,
+		BlacklistExtra: extra,
+	})
 
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", cfg.bind, cfg.port)
@@ -299,6 +320,15 @@ func main() {
 	wg.Wait()
 }
 
+func defaultIPListCacheDir() string {
+	cacheHome := os.Getenv("XDG_CACHE_HOME")
+	if cacheHome == "" {
+		home, _ := os.UserHomeDir()
+		cacheHome = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(cacheHome, "tlsrouter", "iplist")
+}
+
 func defaultConfigDir() string {
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
@@ -332,16 +362,14 @@ func splitList(s string) []string {
 }
 
 func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *http.ServeMux) error {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 
 		slog.Info("listening", "addr", addr)
 		if err := lc.ListenAndProxy(addr, mux); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Error("server error", "err", err)
 		}
 		slog.Info("server closed")
-	}()
+	})
 	return nil
 }
 

@@ -24,6 +24,30 @@ provided that the ip domain and ip-as-subdomain addresses match the allowed doma
 - `--bind` — Address to bind to (default: `0.0.0.0`)
 - `--port` — TLS port to listen on; `-1` to disable (default: `443`)
 - `--plain-port` — Plain HTTP port for redirects; `-1` to disable (default: `80`)
+- `--ip-whitelist` — TSV/CSV file or HTTP(S) URL of IPs, CIDRs, or domains that bypass IP blocking
+- `--ip-blacklist-extra` — TSV/CSV file or HTTP(S) URL of extra IPs, CIDRs, or domains to block
+- `--ip-blacklist-repo` — base git blacklist repo (enabled by default)
+- `--ip-blacklist-dir` — local directory for the base git blacklist
+
+IP policy sources use the first column of each TSV/CSV row. For example:
+
+```tsv
+# host\tcomment
+127.0.0.1\t# ip
+example.com\t# domain
+https://infra.example.com/list.tsv\t# nested source
+```
+
+Blank lines and lines starting with `#` are ignored; later columns are ignored
+metadata. Nested HTTP(S) sources use the same format and are supported up to
+two levels. URL userinfo supplies Basic Auth. Whitelist entries take
+precedence over blacklist entries.
+
+If a whitelist cannot be read, fetched, parsed, or loaded from its cache, all
+blacklists are disabled. This fail-open behavior avoids catastrophic lockout
+during transient errors in this critical service. URL-list cache data is stored
+under `$XDG_CACHE_HOME/tlsrouter/iplist/` or `~/.cache/tlsrouter/iplist/`.
+The git blacklist checkout uses the separate `--ip-blacklist-dir` directory.
 
 ## Environment Variables
 

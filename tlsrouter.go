@@ -34,9 +34,9 @@ import (
 
 	"github.com/bnnanet/tlsrouter/dnsresolver"
 	"github.com/bnnanet/tlsrouter/internal/conntracker"
-	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
+	"github.com/therootcompany/golib/net/ippolicy"
 
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/duckdns"
@@ -297,8 +297,7 @@ type ListenConfig struct {
 	adminServer           *http.Server
 	netLn                 net.Listener
 	dns                   *dnsresolver.Resolver
-	Blocklist             *ipgate.PrefixSet
-	AllowList             *ipgate.DomainSet
+	IPPolicy              *ippolicy.Policy
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
@@ -358,8 +357,6 @@ func NewListenConfig(conf Config) *ListenConfig {
 		alpnsByDomain:         domainMatchers,
 		serviceBySNIALPN:      snialpnMatchers,
 		dns:                   dnsresolver.New(),
-		Blocklist:             ipgate.EmptyPrefixSet(),
-		AllowList:             ipgate.EmptyDomainSet(),
 		connTracker:           conntracker.New(dataDir()),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
@@ -957,7 +954,7 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 		case conn := <-ch:
 			if peer, parseErr := netip.ParseAddrPort(conn.RemoteAddr().String()); parseErr == nil {
 				peerAddr := peer.Addr()
-				if lc.Blocklist.Contains(peerAddr) && !lc.AllowList.Contains(peerAddr) {
+				if lc.IPPolicy != nil && lc.IPPolicy.Evaluate(peerAddr) == ippolicy.Blacklisted {
 					slog.Info("rejected", "src", peerAddr, "reason", "blocked")
 					_ = conn.Close()
 					continue
@@ -1116,7 +1113,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			backends := mcfg.Backends
 			n := uint32(len(backends))
 			start := mcfg.CurrentBackend.Add(1) - 1 // atomic increment, get previous value
-			for attempt := uint32(0); attempt < n; attempt++ {
+			for attempt := range n {
 				idx := (start + attempt) % n
 				b := backends[idx]
 
