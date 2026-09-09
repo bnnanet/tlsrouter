@@ -90,6 +90,7 @@ type MainConfig struct {
 	ipWhitelistPath     string
 	ipBlacklistDir      string
 	ipBlacklistRepo     string
+	ipBlacklistOverlay  string
 	domainBlacklistPath string
 }
 
@@ -129,6 +130,7 @@ func main() {
 	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "Path to IP whitelist CSV file (IPs/CIDRs that bypass the blacklist)")
 	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
 	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
+	fs.StringVar(&cfg.ipBlacklistOverlay, "ip-blacklist-overlay", "", "Path to overlay file for IP blacklist (appended to git repo entries)")
 	fs.StringVar(&cfg.domainBlacklistPath, "domain-blacklist", "", "Path to domain blacklist CSV file (domains blocked from routing)")
 
 	fs.Usage = func() {
@@ -267,7 +269,11 @@ func main() {
 		}
 	}
 	if cfg.ipBlacklistRepo != "none" {
-		blocklist, err := localipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
+		var overlayFiles []string
+		if cfg.ipBlacklistOverlay != "" {
+			overlayFiles = []string{cfg.ipBlacklistOverlay}
+		}
+		blocklist, err := localipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, overlayFiles, []string{
 			"tables/inbound/single_ips.txt",
 			"tables/inbound/networks.txt",
 		})
