@@ -34,7 +34,7 @@ import (
 
 	"github.com/bnnanet/tlsrouter/dnsresolver"
 	"github.com/bnnanet/tlsrouter/internal/conntracker"
-	localipgate "github.com/bnnanet/tlsrouter/internal/ipgate"
+	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/net/tun"
 	"github.com/bnnanet/tlsrouter/tabvault"
 
@@ -42,7 +42,6 @@ import (
 	"github.com/libdns/duckdns"
 	"github.com/mholt/acmez/v3"
 	proxyproto "github.com/pires/go-proxyproto"
-	extipgate "github.com/therootcompany/golib/net/ipgate"
 )
 
 var ErrDoNotTerminate = fmt.Errorf("a self-terminating match was found")
@@ -70,22 +69,20 @@ func (e ErrorNoTLSConfig) Error() string {
 // Note: JSON keys are encoded in a consistent order, as per struct-order,
 // and generic map keys are sorted.
 type Config struct {
-	Revision              string                       `json:"rev,omitempty"`
-	Hash                  string                       `json:"hash,omitempty"`
-	Handler               *http.ServeMux               `json:"-"`
-	ACMEDirectoryEndpoint string                       `json:"-"`
-	FilePath              string                       `json:"-"`
-	FileTime              time.Time                    `json:"-"` // from file date
-	sigChan               chan os.Signal               `json:"-"`
-	TabVault              *tabvault.TabVault           `json:"-"`
-	AdminDNS              ConfigAdmin                  `json:"admin"`
-	Apps                  []ConfigApp                  `json:"apps"`
-	certmagicStorage      certmagic.Storage            `json:"-"`
-	Networks              []net.IPNet                  `json:"dynamic_host_networks"`
-	IPDomains             []string                     `json:"dynamic_ip_domains"`
-	IPs                   []net.IP                     `json:"-"`
-	BlockedDomains        []string                     `json:"blocked_domains,omitempty"`
-	blockedDomains        *localipgate.DomainBlocklist `json:"-"`
+	Revision              string             `json:"rev,omitempty"`
+	Hash                  string             `json:"hash,omitempty"`
+	Handler               *http.ServeMux     `json:"-"`
+	ACMEDirectoryEndpoint string             `json:"-"`
+	FilePath              string             `json:"-"`
+	FileTime              time.Time          `json:"-"` // from file date
+	sigChan               chan os.Signal     `json:"-"`
+	TabVault              *tabvault.TabVault `json:"-"`
+	AdminDNS              ConfigAdmin        `json:"admin"`
+	Apps                  []ConfigApp        `json:"apps"`
+	certmagicStorage      certmagic.Storage  `json:"-"`
+	Networks              []net.IPNet        `json:"dynamic_host_networks"`
+	IPDomains             []string           `json:"dynamic_ip_domains"`
+	IPs                   []net.IP           `json:"-"`
 }
 
 // ShortSHA2 is not safe for use after atomic Store()
@@ -127,14 +124,6 @@ func (c *Config) SetSigChan(sigChan chan os.Signal) {
 
 func (c *Config) Reincarnate() {
 	c.sigChan <- syscall.SIGUSR1
-}
-
-// SetBlockedDomains sets the domain blocklist for filtering during NormalizeConfig.
-func (c *Config) SetBlockedDomains(bl *localipgate.DomainBlocklist) {
-	c.blockedDomains = bl
-	if bl != nil {
-		c.BlockedDomains = bl.Domains()
-	}
 }
 
 // Save must not be called after the atomic Store()
@@ -308,8 +297,8 @@ type ListenConfig struct {
 	adminServer           *http.Server
 	netLn                 net.Listener
 	dns                   *dnsresolver.Resolver
-	Blocklist             *localipgate.PrefixSet
-	AllowList             *extipgate.DomainSet
+	Blocklist             *ipgate.PrefixSet
+	AllowList             *ipgate.DomainSet
 	slowCertmagicConfMap  map[string]struct{}
 	slowACMETLS1ByDomain  map[string]*Backend
 	serviceMu             sync.RWMutex
@@ -369,8 +358,8 @@ func NewListenConfig(conf Config) *ListenConfig {
 		alpnsByDomain:         domainMatchers,
 		serviceBySNIALPN:      snialpnMatchers,
 		dns:                   dnsresolver.New(),
-		Blocklist:             localipgate.EmptyPrefixSet(),
-		AllowList:             extipgate.EmptyDomainSet(),
+		Blocklist:             ipgate.EmptyPrefixSet(),
+		AllowList:             ipgate.EmptyDomainSet(),
 		connTracker:           conntracker.New(dataDir()),
 		slowACMETLS1ByDomain:  make(map[string]*Backend),
 		Context:               ctx,
@@ -548,12 +537,6 @@ func NewListenConfig(conf Config) *ListenConfig {
 	}
 
 	for _, domain := range conf.AdminDNS.Domains {
-		domain = strings.ToLower(domain)
-		domain = strings.TrimPrefix(domain, "*.")
-		if conf.blockedDomains != nil && conf.blockedDomains.Contains(domain) {
-			slog.Info("skipping blocked admin domain", "domain", domain)
-			continue
-		}
 		if err := registerACMEDomain(domain); err != nil {
 			slog.Warn("could not add domain to allowlist", "domain", domain, "err", err)
 			continue
@@ -1133,7 +1116,7 @@ func (lc *ListenConfig) proxy(conn net.Conn) (r int64, w int64, retErr error) {
 			backends := mcfg.Backends
 			n := uint32(len(backends))
 			start := mcfg.CurrentBackend.Add(1) - 1 // atomic increment, get previous value
-			for attempt := range n {
+			for attempt := uint32(0); attempt < n; attempt++ {
 				idx := (start + attempt) % n
 				b := backends[idx]
 

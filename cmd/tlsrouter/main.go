@@ -23,9 +23,8 @@ import (
 
 	"github.com/bnnanet/tlsrouter"
 	"github.com/bnnanet/tlsrouter/ianaalpn"
-	localipgate "github.com/bnnanet/tlsrouter/internal/ipgate"
+	"github.com/bnnanet/tlsrouter/internal/ipgate"
 	"github.com/bnnanet/tlsrouter/tabvault"
-	extipgate "github.com/therootcompany/golib/net/ipgate"
 
 	"github.com/joho/godotenv"
 )
@@ -78,19 +77,18 @@ func printVersion() {
 }
 
 type MainConfig struct {
-	showVersion         bool
-	verbose             bool
-	ipDomainList        string
-	networkList         string
-	port                int
-	plainPort           int
-	bind                string
-	confPath            string
-	vaultPath           string
-	ipWhitelistPath     string
-	ipBlacklistDir      string
-	ipBlacklistRepo     string
-	domainBlacklistPath string
+	showVersion     bool
+	verbose         bool
+	ipDomainList    string
+	networkList     string
+	port            int
+	plainPort       int
+	bind            string
+	confPath        string
+	vaultPath       string
+	ipWhitelistPath string
+	ipBlacklistDir  string
+	ipBlacklistRepo string
 }
 
 func main() {
@@ -129,7 +127,6 @@ func main() {
 	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "Path to IP whitelist CSV file (IPs/CIDRs that bypass the blacklist)")
 	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
 	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
-	fs.StringVar(&cfg.domainBlacklistPath, "domain-blacklist", "", "Path to domain blacklist CSV file (domains blocked from routing)")
 
 	fs.Usage = func() {
 		printVersion()
@@ -221,40 +218,12 @@ func main() {
 
 	conf.SetSigChan(sigChan)
 
-	// Load domain blacklist (before NewListenConfig so NormalizeConfig can filter).
-	// Saved for reapplication on SIGUSR1 config reload.
-	var domainBlocklist *localipgate.DomainBlocklist
-	if cfg.domainBlacklistPath != "" {
-		var err error
-		domainBlocklist, err = localipgate.NewDomainBlocklist(context.Background(), cfg.domainBlacklistPath)
-		if err != nil {
-			slog.Error("domain blacklist load failed", "path", cfg.domainBlacklistPath, "err", err)
-			os.Exit(1)
-		} else if domainBlocklist != nil {
-			conf.SetBlockedDomains(domainBlocklist)
-			slog.Info("domain blacklist loaded", "count", len(conf.BlockedDomains))
-		}
-	}
-
 	mux := http.NewServeMux()
 	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
 
 	if cfg.ipWhitelistPath != "" {
-		staticPrefixes, domains, err := func() ([]string, []string, error) {
-			f, err := os.Open(cfg.ipWhitelistPath)
-			if err != nil {
-				return nil, nil, err
-			}
-			defer func() { _ = f.Close() }()
-			cr := csv.NewReader(f)
-			cr.FieldsPerRecord = -1
-			cr.Comment = '#'
-			if strings.HasSuffix(cfg.ipWhitelistPath, ".tsv") {
-				cr.Comma = '\t'
-			}
-			return extipgate.ParseDomainSet(cr)
-		}()
+		allowList, err := ipgate.NewDomainSet(lc.Context, cfg.ipWhitelistPath)
 		if err != nil {
 			if cfg.ipBlacklistRepo != "none" {
 				slog.Warn("ip-whitelist load failed, blacklist disabled", "err", err)
@@ -262,12 +231,12 @@ func main() {
 			} else {
 				slog.Warn("ip-whitelist load failed", "err", err)
 			}
-		} else {
-			lc.AllowList = extipgate.NewDomainSet(lc.Context, staticPrefixes, domains)
+		} else if allowList != nil {
+			lc.AllowList = allowList
 		}
 	}
 	if cfg.ipBlacklistRepo != "none" {
-		blocklist, err := localipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
+		blocklist, err := ipgate.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
 			"tables/inbound/single_ips.txt",
 			"tables/inbound/networks.txt",
 		})
@@ -301,9 +270,6 @@ func main() {
 					continue
 				}
 				conf.SetSigChan(sigChan)
-				if domainBlocklist != nil {
-					conf.SetBlockedDomains(domainBlocklist)
-				}
 				mux := http.NewServeMux()
 				setupRouter(conf, mux)
 				lc2 := tlsrouter.NewListenConfig(conf)
@@ -366,14 +332,16 @@ func splitList(s string) []string {
 }
 
 func Start(wg *sync.WaitGroup, lc *tlsrouter.ListenConfig, addr string, mux *http.ServeMux) error {
-	wg.Go(func() {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 
 		slog.Info("listening", "addr", addr)
 		if err := lc.ListenAndProxy(addr, mux); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Error("server error", "err", err)
 		}
 		slog.Info("server closed")
-	})
+	}()
 	return nil
 }
 
