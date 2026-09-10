@@ -1534,7 +1534,7 @@ func (lc *ListenConfig) matchService(conf *Config, domain string, alpns []string
 		return &resolvedService{snialpn: snialpn, svc: srvConf}, nil
 	})
 	if resolveErr != nil {
-		if resolveErr == errTryNext {
+		if errors.Is(resolveErr, errTryNext) {
 			return "", nil, ErrorNoTLSConfig(fmt.Sprintf(
 				"no tls config matched for domain %q to backend for any of %q",
 				domain,
@@ -1552,13 +1552,15 @@ func (lc *ListenConfig) refreshCacheEntry(entry *dnsCacheEntry, conf *Config, do
 	case CacheFresh:
 		return entry.service, true
 	case CacheStale:
-		lc.resolveGroup.DoChan(domain, func() (any, error) {
+		refreshKey := domain + ":" + strings.Join(alpns, ",")
+		lc.resolveGroup.DoChan(refreshKey, func() (any, error) {
 			lc.resolveOrExtend(conf, domain, alpns)
 			return nil, nil
 		})
 		return entry.service, true
 	case CacheExpired:
-		lc.resolveGroup.Do(domain, func() (any, error) {
+		refreshKey := domain + ":" + strings.Join(alpns, ",")
+		lc.resolveGroup.Do(refreshKey, func() (any, error) {
 			lc.resolveOrExtend(conf, domain, alpns)
 			return nil, nil
 		})

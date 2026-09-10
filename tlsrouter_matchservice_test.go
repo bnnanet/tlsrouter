@@ -223,3 +223,88 @@ func TestMatchServiceConcurrentDistinctALPNs(t *testing.T) {
 		t.Fatalf("http/1.1 caller backend port = %d, want 443", got)
 	}
 }
+
+// TestRefreshCacheEntryConcurrentDistinctALPNs proves the refreshCacheEntry
+// singleflight key fix.
+//
+// Two cache entries for the same domain but different ALPNs are both expired.
+// Simultaneous matchService calls must each trigger an independent refresh via
+// resolveOrExtend. The barrier DNS server holds both SRV queries until two
+// have arrived — one per ALPN — proving both resolutions are in flight
+// concurrently.
+//
+// With the old domain-only singleflight key, only one ALPN's refresh runs
+// (the other caller is blocked on the shared Do). The barrier never sees the
+// second SRV query and times out; the blocked caller then returns its stale
+// (un-refreshed) entry with the placeholder port.
+func TestRefreshCacheEntryConcurrentDistinctALPNs(t *testing.T) {
+	_, ipNet, _ := net.ParseCIDR("10.0.0.0/8")
+
+	dnsAddr := startBarrierDNSServer(t, "tcp-10-0-0-1.vms.example.com.")
+
+	lc := &ListenConfig{
+		Context: context.Background(),
+		dns: &dnsresolver.Resolver{
+			Servers: []string{dnsAddr},
+			Timeout: 5 * time.Second,
+		},
+		serviceBySNIALPN:     make(map[SNIALPN]*dnsCacheEntry),
+		slowACMETLS1ByDomain: make(map[string]*Backend),
+	}
+
+	conf := Config{
+		Networks:  []net.IPNet{*ipNet},
+		IPDomains: []string{"vms.example.com"},
+	}
+
+	const domain = "site.example.com"
+
+	// Pre-populate expired cache entries with placeholder ports so we can
+	// detect whether each entry was actually refreshed.
+	past := time.Now().Add(-10 * time.Minute)
+	for _, alpn := range []string{"ssh", "http/1.1"} {
+		snialpn := NewSNIALPN(domain, alpn)
+		placeholder := &ConfigService{
+			Slug:     "placeholder-" + alpn,
+			Domains:  []string{domain},
+			ALPNs:    []string{alpn},
+			Backends: []Backend{{Port: 9999}},
+		}
+		lc.serviceBySNIALPN[snialpn] = newCacheEntry(placeholder, past, past.Add(5*time.Minute))
+	}
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs = [2]error{}
+		svcs = [2]*ConfigService{}
+	)
+	resolve := func(idx int, alpn string) {
+		_, svc, err := lc.matchService(&conf, domain, []string{alpn})
+		mu.Lock()
+		errs[idx], svcs[idx] = err, svc
+		mu.Unlock()
+	}
+
+	wg.Go(func() { resolve(0, "ssh") })
+	time.Sleep(100 * time.Millisecond) // let the ssh refresh reach the barrier
+	wg.Go(func() { resolve(1, "http/1.1") })
+	wg.Wait()
+
+	for i, alpn := range []string{"ssh", "http/1.1"} {
+		if errs[i] != nil {
+			t.Fatalf("matchService(%s) error: %v", alpn, errs[i])
+		}
+		if svcs[i] == nil {
+			t.Fatalf("matchService(%s) returned nil service", alpn)
+		}
+	}
+
+	// Both entries must have been refreshed (placeholder port 9999 replaced).
+	if got := svcs[0].Backends[0].Port; got != 44322 {
+		t.Fatalf("ssh caller backend port = %d, want 44322 (entry not refreshed — shared singleflight?)", got)
+	}
+	if got := svcs[1].Backends[0].Port; got != 443 {
+		t.Fatalf("http/1.1 caller backend port = %d, want 443 (entry not refreshed — shared singleflight?)", got)
+	}
+}
