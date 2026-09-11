@@ -400,14 +400,6 @@ func getAllowedSrv(
 
 	wg.Wait()
 
-	if !cnameMatch && !ipMatch {
-		var ipAddrs []string
-		for _, ip := range conf.IPs {
-			ipAddrs = append(ipAddrs, ip.String())
-		}
-		return nil, fmt.Errorf("%w: %q has no CNAME matching %q, nor A record matching any of %v", errNoDNSMatch, domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
-	}
-
 	for _, best := range options {
 		if best != nil {
 			if best.TTL == 0 {
@@ -415,6 +407,14 @@ func getAllowedSrv(
 			}
 			return best, nil
 		}
+	}
+
+	if !cnameMatch && !ipMatch {
+		var ipAddrs []string
+		for _, ip := range conf.IPs {
+			ipAddrs = append(ipAddrs, ip.String())
+		}
+		return nil, fmt.Errorf("%w: %q has no CNAME matching %q, nor A record matching any of %v", errNoDNSMatch, domain, strings.Join(conf.IPDomains, ","), strings.Join(ipAddrs, ", "))
 	}
 	return nil, fmt.Errorf("%w for %q with offered ALPNs", errNoMatchingRecord, domain)
 }
