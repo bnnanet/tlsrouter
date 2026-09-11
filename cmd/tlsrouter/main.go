@@ -225,9 +225,9 @@ func main() {
 	setupRouter(conf, mux)
 	lc := tlsrouter.NewListenConfig(conf)
 
-	var whitelist *iplist.Source
+	var whitelist *iplist.IPList
 	if cfg.ipWhitelistPath != "" {
-		whitelist, err = iplist.NewSource(lc.Context, iplist.SourceConfig{
+		whitelist, err = iplist.NewIPList(lc.Context, iplist.IPListConfig{
 			Source:   cfg.ipWhitelistPath,
 			CacheDir: defaultIPListCacheDir(),
 		})
@@ -237,22 +237,22 @@ func main() {
 		}
 	}
 
-	var extra *iplist.Source
-	var gitBlacklist *ippolicy.PrefixSet
+	var blacklistExtra *iplist.IPList
+	var gitBlacklist *ippolicy.IPPrefixSet
 	if whitelist != nil {
 		if cfg.ipBlacklistExtra != "" {
-			extra, err = iplist.NewSource(lc.Context, iplist.SourceConfig{
+			blacklistExtra, err = iplist.NewIPList(lc.Context, iplist.IPListConfig{
 				Source:   cfg.ipBlacklistExtra,
 				CacheDir: defaultIPListCacheDir(),
 				Optional: true,
 			})
 			if err != nil {
 				slog.Warn("ip-blacklist-extra load failed", "err", err)
-				extra = nil
+				blacklistExtra = nil
 			}
 		}
 		if cfg.ipBlacklistRepo != "none" {
-			gitBlacklist, err = ippolicy.NewPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
+			gitBlacklist, err = ippolicy.NewIPPrefixSet(lc.Context, cfg.ipBlacklistRepo, cfg.ipBlacklistDir, []string{
 				"tables/inbound/single_ips.txt",
 				"tables/inbound/networks.txt",
 			}, 0)
@@ -262,11 +262,15 @@ func main() {
 			}
 		}
 	}
-	lc.IPPolicy = ippolicy.New(lc.Context, ippolicy.Config{
+	policy := ippolicy.New(lc.Context, ippolicy.Config{
 		Whitelist:      whitelist,
 		Blacklist:      gitBlacklist,
-		BlacklistExtra: extra,
+		BlacklistExtra: blacklistExtra,
 	})
+	if _, err := policy.Load(lc.Context, true); err != nil {
+		slog.Warn("ip policy load failed, keeping available policy data", "err", err)
+	}
+	lc.IPPolicy = policy
 
 	var wg sync.WaitGroup
 	addr := fmt.Sprintf("%s:%d", cfg.bind, cfg.port)

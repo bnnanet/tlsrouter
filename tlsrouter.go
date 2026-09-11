@@ -348,6 +348,12 @@ func (lc *ListenConfig) Shutdown(ctx context.Context) {
 	_ = lc.netLn.Close()
 	// TODO create a context with a 5 second timeout and
 	_ = lc.adminServer.Shutdown(ctx)
+	if lc.IPPolicy != nil {
+		if err := lc.IPPolicy.Stop(); err != nil {
+			slog.Warn("ip policy shutdown failed", "err", err)
+		}
+	}
+	lc.Close()
 	lc.connTracker.Shutdown()
 	lc.done <- ctx
 }
@@ -1007,10 +1013,16 @@ func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
 		case conn := <-ch:
 			if peer, parseErr := netip.ParseAddrPort(conn.RemoteAddr().String()); parseErr == nil {
 				peerAddr := peer.Addr()
-				if lc.IPPolicy != nil && lc.IPPolicy.Evaluate(peerAddr) == ippolicy.Blacklisted {
-					slog.Info("rejected", "src", peerAddr, "reason", "blocked")
-					_ = conn.Close()
-					continue
+				if lc.IPPolicy != nil {
+					evaluator, err := lc.IPPolicy.Load(lc.Context, false)
+					if err != nil {
+						slog.Warn("ip policy refresh failed", "err", err)
+					}
+					if evaluator.Evaluate(peerAddr) == ippolicy.Blacklisted {
+						slog.Info("rejected", "src", peerAddr, "reason", "blocked")
+						_ = conn.Close()
+						continue
+					}
 				}
 			}
 			dbg("DEBUG: (new): accepted %s", conn.RemoteAddr())
