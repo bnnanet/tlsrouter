@@ -118,7 +118,7 @@ func main() {
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
 	fs.BoolVar(&cfg.showVersion, "version", false, "Print version and exit")
-	fs.BoolVar(&cfg.verbose, "verbose", false, "Enable debug trace output")
+	fs.BoolVar(&cfg.verbose, "verbose", envOrBool("VERBOSE", false), "Enable debug trace output")
 	fs.StringVar(&cfg.ipDomainList, "ip-domains", cmp.Or(os.Getenv("DYNAMIC_IP_DOMAIN"), "example.localdomain"), "enable dynamic ip urls (ex: tls-192-168-1-101.vm.example.com) with these comma-separated base URLs")
 	fs.StringVar(&cfg.networkList, "networks", cmp.Or(os.Getenv("DYNAMIC_HOST_NETWORKS"), "169.254.0.0/16"), "enable dynamic ip url proxying (see --ip-domain) for these networks")
 	fs.IntVar(&cfg.port, "port", envOrInt("PORT", 443), "TLS port to listen on. -1 to disable.")
@@ -126,19 +126,22 @@ func main() {
 	fs.StringVar(&cfg.bind, "bind", cmp.Or(os.Getenv("BIND"), "0.0.0.0"), "Address to bind to")
 	fs.StringVar(&cfg.confPath, "config", cmp.Or(os.Getenv("CONFIG_FILE"), filepath.Join(defaultConfigDir(), "backends.csv")), "Path to backends config CSV file")
 	fs.StringVar(&cfg.vaultPath, "vault", cmp.Or(os.Getenv("VAULT_FILE"), filepath.Join(defaultConfigDir(), "secrets.tsv")), "Path to vault TSV file")
-	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", filepath.Join(defaultConfigDir(), "allowed.csv"), "IP whitelist TSV/CSV file or HTTP(S) URL (IPs/CIDRs/domains)")
-	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", defaultBlocklistPath(), "Path to IP blacklist data directory")
-	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", defaultBlocklistRepo, "Git repo URL for IP blacklist, or 'none' to disable")
-	fs.StringVar(&cfg.ipBlacklistExtra, "ip-blacklist-extra", "", "IP blacklist TSV/CSV file or HTTP(S) URL (IPs/CIDRs/domains)")
+	fs.StringVar(&cfg.ipWhitelistPath, "ip-whitelist", cmp.Or(os.Getenv("WHITELIST"), filepath.Join(defaultConfigDir(), "allowed.csv")), "IP whitelist TSV/CSV file or HTTP(S) URL (IPs/CIDRs/domains)")
+	fs.StringVar(&cfg.ipBlacklistDir, "ip-blacklist-dir", cmp.Or(os.Getenv("BLACKLIST_DIR"), defaultBlocklistPath()), "Path to IP blacklist data directory")
+	fs.StringVar(&cfg.ipBlacklistRepo, "ip-blacklist-repo", cmp.Or(os.Getenv("BLACKLIST_REPO"), defaultBlocklistRepo), "Git repo URL for IP blacklist, or 'none' to disable")
+	fs.StringVar(&cfg.ipBlacklistExtra, "ip-blacklist-extra", os.Getenv("BLACKLIST_EXTRA"), "IP blacklist TSV/CSV file or HTTP(S) URL (IPs/CIDRs/domains)")
 
 	fs.Usage = func() {
 		printVersion()
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "USAGE\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter [options]\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter hash-password   # generate a PBKDF2 password hash for vault auth\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter version | help\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "EXAMPLES\n")
 		fmt.Fprintf(os.Stderr, "   tlsrouter --networks 10.1.1.0/24 --bind 0.0.0.0 --port 443\n")
+		fmt.Fprintf(os.Stderr, "   tlsrouter hash-password\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS\n")
 		fs.PrintDefaults()
@@ -348,11 +351,24 @@ func envOrInt(key string, fallback int) int {
 		return fallback
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
+	if err != nil || (n < 1 && n != -1) {
 		slog.Warn("invalid env value, using default", "key", key, "value", v, "default", fallback)
 		return fallback
 	}
 	return n
+}
+
+func envOrBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		slog.Warn("invalid env value, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return b
 }
 
 func splitList(s string) []string {
