@@ -40,6 +40,8 @@ github.com/therootcompany/golib/net/ipcohort v0.9.0 h1:j3AaoW2u4XQJz1ya6fixv3pb3
 github.com/therootcompany/golib/net/ipcohort v0.9.0/go.mod h1:Ljcnt2xOryVDGIVV5Kzt5hj2LhW4lBAWo5OeeVYU9ys=
 github.com/therootcompany/golib/net/iplist v0.9.3 h1:g0KKrBPd9K0VuJZypu5uNnCz3Rz4nS0XsTRhrLMpbuU=
 github.com/therootcompany/golib/net/iplist v0.9.3/go.mod h1:TJ+0RP4M8/zkjdm+D9YXvDUJL2VZiC2VpnZJiK9Bfjk=
+github.com/therootcompany/golib/net/iplist v0.9.4 h1:k5t1b97CYJPwDaI6o5a0odfOhwU836alCepYlp5OLbg=
+github.com/therootcompany/golib/net/iplist v0.9.4/go.mod h1:TJ+0RP4M8/zkjdm+D9YXvDUJL2VZiC2VpnZJiK9Bfjk=
 github.com/therootcompany/golib/net/ippolicy v0.10.0 h1:Eq5R7SfDV9WXRGcdZH7tzHomWgcbZqeUzRKR3yWcBt0=
 github.com/therootcompany/golib/net/ippolicy v0.10.0/go.mod h1:vhPFHj55JxIfdiBcV/z5Gnx/K9BEvesxI3ReMXLhpWk=
 github.com/therootcompany/golib/sync/cacheable v0.1.0 h1:s6mz4dZv9Vsd0nuDz8IpS+n35GLjOwpjZlomimkqw1M=

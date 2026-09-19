@@ -46,7 +46,9 @@ https://infra.example.com/list.tsv\t# nested source
 ```
 
 Blank lines and lines starting with `#` are ignored; later columns are ignored
-metadata. Nested HTTP(S) sources use the same format and are supported up to
+metadata. An optional header row with `network` or `source` as the first
+column is recognized and skipped (case-insensitive).
+Nested HTTP(S) sources use the same format and are supported up to
 two levels. URL userinfo supplies Basic Auth. Whitelist entries take
 precedence over blacklist entries.
 
