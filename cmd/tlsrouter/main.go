@@ -12,13 +12,11 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bnnanet/tlsrouter"
@@ -209,7 +207,7 @@ func main() {
 	}
 
 	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
+	notifySignals(sigChan)
 
 	tabVault, err := tabvault.OpenOrCreate(cfg.vaultPath)
 	if err != nil {
@@ -283,7 +281,7 @@ func main() {
 		for {
 			sig := <-sigChan
 			switch sig {
-			case syscall.SIGUSR1:
+			case sigReload:
 				slog.Info("reloading config", "signal", "SIGUSR1")
 
 				// TODO kill connections to management
@@ -308,12 +306,12 @@ func main() {
 
 				// Update server reference
 				lc = lc2
-			case syscall.SIGINT:
+			case sigInt:
 				slog.Info("shutting down", "signal", "SIGINT", "grace", "5s")
 				lc.Shutdown(context.Background())
 				time.Sleep(5 * time.Second)
 				os.Exit(1)
-			case syscall.SIGTERM:
+			case sigTerm:
 				slog.Info("shutting down", "signal", "SIGTERM", "grace", "5s")
 				lc.Shutdown(context.Background())
 				time.Sleep(5 * time.Second)

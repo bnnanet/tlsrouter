@@ -26,11 +26,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"golang.org/x/sync/singleflight"
-	"golang.org/x/sys/unix"
 
 	"github.com/bnnanet/tlsrouter/dnsresolver"
 	"github.com/bnnanet/tlsrouter/internal/conntracker"
@@ -157,10 +155,6 @@ func (c *Config) SetSigChan(sigChan chan os.Signal) {
 		panic(errors.New("'sigChan' can only be set once"))
 	}
 	c.sigChan = sigChan
-}
-
-func (c *Config) Reincarnate() {
-	c.sigChan <- syscall.SIGUSR1
 }
 
 // Save must not be called after the atomic Store()
@@ -950,12 +944,6 @@ func dataDir() string {
 		baseDir = xdgData
 	}
 	return filepath.Join(baseDir, "tlsrouter")
-}
-
-func reusePort(network, address string, conn syscall.RawConn) error {
-	return conn.Control(func(descriptor uintptr) {
-		_ = syscall.SetsockoptInt(int(descriptor), syscall.SOL_SOCKET, unix.SO_REUSEPORT, 1)
-	})
 }
 
 func (lc *ListenConfig) ListenAndProxy(addr string, mux *http.ServeMux) error {
