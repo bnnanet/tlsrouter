@@ -453,11 +453,19 @@ func findSrvForALPN(
 		// http/1.1 => http
 		// tds/8.0 => tds
 		// stun.turn => stun-turn
-		service = strings.Split(alpn, "/")[0]
+		shorthand := strings.Split(alpn, "/")[0]
 		// no known ALPNs have both dots in the name and in versions,
 		// so this is just for future-proofing, ex: stun.turn/2.0
-		service = strings.ReplaceAll(service, ".", "-")
-		return findSrvForALPN(ctx, dns, conf, domain, service)
+		shorthand = strings.ReplaceAll(shorthand, ".", "-")
+		// fall back to shorthand SRV lookup, but preserve the original ALPN
+		if route, err := findSrvForALPN(ctx, dns, conf, domain, shorthand); err == nil {
+			route.ALPN = alpn
+			return route, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, errTryNext
 	}
 
 	if err != nil {
