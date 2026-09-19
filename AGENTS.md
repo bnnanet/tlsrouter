@@ -40,8 +40,8 @@ serviceman add --name tlsrouter -- ~/bin/tlsrouter daemon
 | Path | Purpose |
 | ---- | ------- |
 | `cmd/tlsrouter/` | Main entry point |
-| `cmd/tabvault/` | Vault CLI (hash-password, etc.) |
-| `cmd/alpn-get/` | IANA ALPN registry fetcher |
+| `cmd/tabvault/` | Vault CLI (new, add, append, verify) |
+| `tools/alpn-get/` | IANA ALPN registry fetcher (internal dev tool) |
 | `ianaalpn/` | Embedded ALPN registry data |
 | `tlsrouter.go` | Core proxy logic, PlainConn, wrappedConn |
 | `api.go` | Admin API handlers, connection reporting |
@@ -58,12 +58,12 @@ Server paths:
 
 ## Static Config (backends.csv)
 
-Headers: `app_slug,domain,alpn,backend_address,backend_port,terminate_tls,connect_tls,skip_tls_verify,auth,allowed_client_hostnames`
+Headers: `app_slug,domain,alpn,backend_address,backend_port,terminate_tls,connect_tls,rewrite_host,skip_tls_verify,auth,allowed_client_hostnames`
 
 ```csv
-_admin,vms.example.com,admin,vault://5d7d83f3...,,,,,
-myapp,site.example.com,ssh,127.0.0.1,22,false,false,false,
-myapp,site.example.com,http/1.1,172.16.0.1,443,true,true,true,vault://a1b2c3...,
+_admin,vms.example.com,admin,vault://5d7d83f3...,,,,,,,
+myapp,site.example.com,ssh,127.0.0.1,22,false,false,false,,,
+myapp,site.example.com,http/1.1,172.16.0.1,443,true,true,,true,vault://a1b2c3...,
 ```
 
 - `_admin` app_slug with `alpn=admin` → admin API backend (still HTTP on the wire; `admin` is a config shim, not a real ALPN)
@@ -111,10 +111,43 @@ CLI flags: `--ip-domains` (which domains are IP-pattern domains), `--networks` (
 - MUST inject PlainConn (not raw `*tls.Conn`) to preserve byte counters
 - See PlainConn comments in `tlsrouter.go` for h2/connectionStater constraints
 
+### Backend Port Matching
+
+For non-HTTP ALPNs (mysql, postgresql, tds/8.0, etc.), the terminated port
+(e.g. 13306, 15432, 11433) is not the service's native port. The ideal setup
+is to configure the service to listen on the terminated port directly.
+Alternatively, `tcpfwd` or `socat` can forward from the terminated port to
+the service's native port when changing the service port is less desirable:
+
+```sh
+# MySQL: tcpfwd 13306:<backend-ip>:3306  (or configure MariaDB on :13306)
+# SQL Server: tcpfwd 11433:<backend-ip>:1433  (or configure SQL Server on :11433)
+```
+
+Without one of these, the TLS router terminates TLS and dials the terminated
+port, but nothing is listening there.
+
+### Client Access (`sclient`)
+
+Non-HTTP services behind the TLS router are accessed via `sclient`, which
+wraps a plain TCP connection in TLS with a specified ALPN:
+
+```sh
+# MySQL through the TLS router
+sclient --alpn mysql tls-10-11-10-22.example.net:443 localhost:23306
+
+# SSH through the TLS router
+ssh -o ProxyCommand='sclient --alpn ssh %h' user@tls-10-11-2-21.example.net
+```
+
+HTTP services are accessed directly via `curl` or a browser — no `sclient`
+needed since the TLS router terminates TLS and forwards plain HTTP to port
+3080.
+
 ## Updating ALPN Registry Data
 
 ```sh
-go run ./cmd/alpn-get/ > ./agents/tmp/alpn-new.json 2>./agents/tmp/alpn-warnings.txt
+go run ./tools/alpn-get/ > ./agents/tmp/alpn-new.json 2>./agents/tmp/alpn-warnings.txt
 cp ./agents/tmp/alpn-new.json ./ianaalpn/alpn.json
 ```
 
