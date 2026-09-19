@@ -88,7 +88,7 @@ func main() {
 	// Step 2: Try downloading CSV, fallback to cache
 	var csvBytes []byte
 	if err := isCacheValid(cachePath, cacheMaxAge); err != nil {
-		fmt.Println("Cache is invalid or expired, downloading CSV...")
+		fmt.Fprintln(os.Stderr, "Cache is invalid or expired, downloading CSV...")
 		csvBytes, err = downloadCSV()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error downloading CSV: %v\n", err)
