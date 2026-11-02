@@ -72,8 +72,7 @@ func TestMatchServiceNoTLSConfig(t *testing.T) {
 	if err == nil {
 		t.Fatal("matchService = nil error, want error")
 	}
-	var want ErrorNoTLSConfig
-	if !errors.As(err, &want) {
+	if _, ok := errors.AsType[ErrorNoTLSConfig](err); !ok {
 		t.Fatalf("matchService error = %T %v, want ErrorNoTLSConfig", err, err)
 	}
 }
