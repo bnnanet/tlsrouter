@@ -1,6 +1,6 @@
 module github.com/bnnanet/tlsrouter
 
-go 1.26.5
+go 1.27.3
 
 tool github.com/therootcompany/golib/io/transform/gsheet2csv/cmd/gsheet2csv
 
@@ -18,13 +18,6 @@ require (
 )
 
 require (
-	github.com/therootcompany/golib/net/dnsresolver v0.6.0 // indirect
-	github.com/therootcompany/golib/net/gitshallow v0.10.0 // indirect
-	github.com/therootcompany/golib/net/httpcache v0.6.0 // indirect
-	github.com/therootcompany/golib/net/ipcohort v0.9.0 // indirect
-)
-
-require (
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
@@ -33,6 +26,10 @@ require (
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/therootcompany/golib/https v0.9.0 // indirect
 	github.com/therootcompany/golib/io/transform/gsheet2csv v1.1.0 // indirect
+	github.com/therootcompany/golib/net/dnsresolver v0.6.0 // indirect
+	github.com/therootcompany/golib/net/gitshallow v0.10.0 // indirect
+	github.com/therootcompany/golib/net/httpcache v0.6.0 // indirect
+	github.com/therootcompany/golib/net/ipcohort v0.9.0 // indirect
 	github.com/therootcompany/golib/sync/cacheable v0.1.0 // indirect
 	github.com/zeebo/assert v1.3.1 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
